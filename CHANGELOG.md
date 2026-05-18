@@ -578,7 +578,7 @@ The following features are still being tuned. Behavior, schema, and naming may c
 
 ### Changed
 
-- BREAKING: `expert` / `expert-mini` / `expert-cqrs` / `expert-cqrs-mini` ピースを `dual` / `dual-mini` / `dual-cqrs` / `dual-cqrs-mini` にリネーム。カスタマイズしている場合はピース名を更新が必要
+- BREAKING: `expert` / `expert-mini` / `expert-cqrs` / `expert-cqrs-mini` ピースを `dual` / `dual-mini` / `dual-cqrs` / `dual-cqrs-mini` にリネーム。カスタマイズしている場合はピース名の更新が必要
 - `default-mini` / `default-test-first-mini` ピースを `default` に統合。`default` ピースが「テスト優先モード」を内包するよう拡張
 - `coding-pitfalls` ナレッジの主要項目を `coding` ポリシーに移動し、ポリシーとして実際に適用されるよう強化
 - `implement` / `plan` インストラクションにセルフチェック・コーダー指針を追加
@@ -1321,7 +1321,7 @@ Formal release of 0.8.0-alpha.1 content. No functional changes.
 - Branch name generation strategy is now configurable (`branch_name_strategy` config)
 - Added auto-PR feature and unified PR creation logic (#98)
 - Piece selection now also applies for issue references (#97)
-- Sleep functionality added to movements
+- Optional macOS idle sleep prevention during piece execution (#100)
 
 ### Changed
 
