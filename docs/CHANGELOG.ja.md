@@ -6,6 +6,34 @@
 
 フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に基づいています。
 
+## [0.42.0] - 2026-05-20
+
+### Added
+
+- `claude-terminal` プロバイダを追加 (#727)。Anthropic SDK（`claude-sdk`）や headless CLI（`claude`）を呼ぶのではなく、tmux ペイン内で対話型 Claude Code CLI セッションを起動し、セッションのトランスクリプトから結果を読み取る新しい実行方式。`--provider claude-terminal` または設定ファイルで選択する。structured output / MCP サーバ / allowed-tools に対応し、権限確認や ask-user-question のプロンプトはターミナル経由で受け渡しする。プロバイダオプションは `provider_options.claude_terminal` 配下（`backend: tmux`, `timeout_ms`, `keep_session`, `transcript_poll_interval_ms`）。利用には `tmux` のインストールが必要で、`maxTurns` は非対応、トランスクリプトに含まれないため API 使用量は取得できない
+- オプトインの OpenTelemetry オブザーバビリティを追加 (#706, #745)。`~/.takt/config.yaml`（グローバル）または `.takt/config.yaml`（プロジェクト）で `observability.enabled: true` を設定する（環境変数 `TAKT_observability__enabled` でも上書き可）と、ワークフロー実行の OTel スパンを出力する。各 run は `workflow.<name>` スパンを生成し、その子として `step.<name>` スパンが付き、ワークフロー / ステップ名・ステップ種別・iteration 回数・解決された provider / model（とその設定ソース）・最終ステータス（abort 種別を含む）といった属性を持つ。スパンは通常実行と並走する非ブロッキングの「シャドウ」として出力され、run の挙動は一切変えない。基盤は OTel Node SDK（サービス名 `takt`）を初期化するが exporter は同梱しないため、標準の `OTEL_*` 環境変数で自前のコレクタに接続する。デフォルトは無効
+- `/accept` 対話コマンドを追加 (#733)。対話アシスタントモードで、`/accept` は直近のアシスタント発言をそのままタスクとして実行する（`/go` による要約を経由しない）。アシスタント発言がまだ無い場合は、先にタスク内容を入力するよう促す
+- アシスタント init ファイルを追加 (#734)。`.takt/config.yaml` の `assistant.init_files` にプロジェクトのコンテキストファイルを列挙すると、対話アシスタントの会話ごとに「Assistant Init Context」セクションとして自動的に読み込まれる。これによりアーキテクチャメモ・規約・独自指示などのプロジェクト固有コンテキストを毎回手作業で渡さずに済む。パスはプロジェクト内の相対パスに限られ、機微なファイル（`.env*`, `.pem`, `.key`, `.npmrc`, `.netrc`, `.git/` など）は拒否される。上限は 16 ファイル / 1 ファイル 256 KB / 合計 1 MB
+- GitHub PR のレビュースレッドを解決状態で分類するようにした (#746)。PR レビューコメントをタスクに取り込む際、スレッドを Active・Outdated だが未解決・解決済み / Outdated の各セクションに分け、それぞれ誰が解決したか・outdated かどうかを注記する。レビューポリシーにより、エージェントは active スレッドに集中し、outdated だが未解決のものは現在も該当するか再確認し、解決済みスレッドは同じ問題がコードに残っていない限りスキップする。これにより対応済みのフィードバックを蒸し返さない
+- enqueue effect の `base_branch` でブランチを必要時に作成できるようにした (#725)。システムワークフローの enqueue effect の `base_branch` が、従来の文字列に加えてオブジェクト形式 `{ name, create_if_missing: { from, push } }` を受け付けるようになった。指定したベースブランチが存在しない場合、TAKT が `from` から作成する（`push: true` のときは push も行う）。ビルトインの `auto-improvement-loop` はこれを使って `improve` ベースブランチを `main` から自動作成するため、手動のブランチ準備なしでループを実行できる
+
+### Changed
+
+- ビルトインのレビュー系ファセットを補強（en + ja）。`cqrs-es` ナレッジにイベント進化と抽象境界に関するガイダンスを追加し、ai-antipattern / coding / qa / review / testing ポリシーの REJECT / APPROVE 基準を強化、frontend ナレッジと frontend-review 出力契約に canonical state（正規の状態）に関するガイダンスを追加した。ワークフロー構造は変えずに、ビルトインレビューワが何を強制するかを精緻化している
+
+### Fixed
+
+- OpenCode の応答で、SDK が差分（delta）と全文スナップショットの両方を出すときにコンテンツが二重化する問題を修正 (#749)。従来は両ストリームを連結していたため、アシスタントのテキストが応答に二重に現れていた
+- プロバイダの rate-limit メッセージを、汎用的なプロセスエラーに潰さずに保持するようにした (#730)。プロバイダが rate limit を報告した際、元のメッセージが応答を通じて残るため原因が見えるようになる
+
+### Internal
+
+- 設定ドキュメントとバリデーションエラーメッセージの表記を snake_case に統一 (#747)。設定リファレンスとエラー文が camelCase 名（`workflowArpeggio`, `syncConflictResolver`, `taktProviders` ……）を使っていたが、これらはパーサが実際に期待する snake_case の YAML キー（`workflow_arpeggio`, `sync_conflict_resolver`, `takt_providers` ……）とは一致していなかった。ドキュメントとメッセージが TAKT が実際に読み取るキーを示すようになった。挙動・スキーマの変更はない
+- リポジトリレビュー向けに CodeRabbit 連携を追加。`.coderabbit.yaml` 設定、TAKT ファセットを `code_guidelines` として参照、probe 結果に基づく設定チューニング、スポンサー記載 (#737, #738, #742, #744)
+- CI を統合し、トリガーを `/review` に変更。`issue_comment` 駆動の 4 ワークフローを単一の `pr-comment-commands.yml` に統合し、takt-review のコメントトリガーを `/takt-review` から `/review` に変更した (#726, #728, #736)
+- ドキュメントを再編成。Design Philosophy ページと External Integrations ページを追加し、workflows ガイド（`workflows.ja.md` を含む）を最新化、古い内部ドキュメント（data-flow / provider-sandbox / report-phase-permissions / agents）を削除した (#723, #729, #739)
+- 実行されない成果物に対する脆いテスト（README 用語 / instruction テンプレートのチェック）を削除し、testing ポリシーにそうしたテストを避ける指針を追加 (#730)
+
 ## [0.41.0] - 2026-05-14
 
 ### Added

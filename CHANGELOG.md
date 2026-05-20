@@ -6,6 +6,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.42.0] - 2026-05-20
+
+### Added
+
+- `claude-terminal` provider added (#727). A new way to run Claude that drives an interactive Claude Code CLI session inside a tmux pane and reads results back from the session transcript, instead of calling the Anthropic SDK (`claude-sdk`) or the headless CLI (`claude`). Select it with `--provider claude-terminal` or in config. It supports structured output, MCP servers, and allowed-tools, and surfaces permission / ask-user-question prompts back through the terminal. Provider options live under `provider_options.claude_terminal` (`backend: tmux`, `timeout_ms`, `keep_session`, `transcript_poll_interval_ms`). Requires `tmux` to be installed; `maxTurns` is not supported, and API usage figures are unavailable because the terminal transcript does not expose them
+- Opt-in OpenTelemetry observability added (#706, #745). Set `observability.enabled: true` in `~/.takt/config.yaml` (global) or `.takt/config.yaml` (project) — also overridable via the `TAKT_observability__enabled` env var — to emit OTel spans for workflow execution. Each run produces a `workflow.<name>` span with child `step.<name>` spans carrying attributes such as workflow / step name, step type, iteration counts, the resolved provider / model (and their config source), and final status (including abort kind). Spans are emitted as a non-blocking "shadow" alongside normal execution and never alter run behavior. The foundation initializes the OTel Node SDK (service name `takt`) but ships no exporter, so you wire up your own collector via the standard `OTEL_*` environment variables. Off by default
+- `/accept` interactive command added (#733). In interactive assistant mode, `/accept` takes the most recent assistant response verbatim and runs it as the task, without re-summarizing through `/go`. If there is no assistant response yet, it asks you to describe the task first
+- Assistant init files added (#734). List project context files under `assistant.init_files` in `.takt/config.yaml` and they are loaded automatically into every interactive assistant conversation as an "Assistant Init Context" section, so project-specific context (architecture notes, conventions, custom instructions) is included without manual setup. Paths must be relative and inside the project; sensitive files (`.env*`, `.pem`, `.key`, `.npmrc`, `.netrc`, `.git/`, etc.) are rejected, with limits of 16 files, 256 KB per file, and 1 MB total
+- GitHub PR review threads are now classified by resolution state (#746). When TAKT feeds PR review comments into a task, threads are split into Active, Outdated-but-unresolved, and Resolved/Outdated sections, each annotated with who resolved it and whether it is outdated. A review policy directs the agent to focus on active threads, re-check outdated-unresolved ones for current relevance, and skip resolved threads unless the same issue still persists in the code — so already-handled feedback is not re-litigated
+- Enqueue effect `base_branch` can create the branch on demand (#725). The system-workflow enqueue effect's `base_branch` now accepts an object form `{ name, create_if_missing: { from, push } }` in addition to a plain string. When the named base branch does not exist, TAKT creates it from `from` (and pushes it when `push: true`). The builtin `auto-improvement-loop` uses this to create its `improve` base branch from `main` automatically, so the loop runs without manual branch setup
+
+### Changed
+
+- Builtin review facets refined (en + ja). CQRS-ES knowledge gained guidance on event evolution and abstraction boundaries; the AI-antipattern, coding, QA, review, and testing policies tightened their REJECT / APPROVE criteria; and frontend knowledge plus the frontend-review output contract gained canonical-state guidance. These sharpen what the builtin reviewers enforce without changing workflow structure
+
+### Fixed
+
+- OpenCode responses no longer duplicate content when the SDK emits both incremental deltas and a full snapshot (#749). The two streams were previously concatenated, so the assistant text appeared twice in the response
+- Provider rate-limit messages are now preserved instead of being flattened into a generic process error (#730). When a provider reports a rate limit, the original message survives through the response so the cause is visible
+
+### Internal
+
+- Configuration docs and validation error messages aligned to snake_case (#747). The config reference and error text used camelCase names (`workflowArpeggio`, `syncConflictResolver`, `taktProviders`, …) that never matched the actual snake_case YAML keys (`workflow_arpeggio`, `sync_conflict_resolver`, `takt_providers`, …) the parser expects. Documentation and messages now show the keys TAKT actually reads. No behavior or schema change
+- CodeRabbit integration added for repository reviews — `.coderabbit.yaml` configuration, TAKT facets referenced as `code_guidelines`, probe-based config tuning, and a sponsor mention (#737, #738, #742, #744)
+- CI consolidated and retriggered on `/review`. The four `issue_comment`-driven workflows were merged into a single `pr-comment-commands.yml`, and the takt-review comment trigger moved from `/takt-review` to `/review` (#726, #728, #736)
+- Documentation reorganized: added a Design Philosophy page and an External Integrations page, refreshed the workflows guide (including `workflows.ja.md`), and removed stale internal docs (data-flow, provider-sandbox, report-phase-permissions, agents) (#723, #729, #739)
+- Removed brittle non-executable asset tests (README terminology / instruction-template checks) and added testing-policy guidance discouraging such tests (#730)
+
 ## [0.41.0] - 2026-05-14
 
 ### Added

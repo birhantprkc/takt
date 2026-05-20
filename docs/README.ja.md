@@ -39,6 +39,7 @@ workflow で工程を定義し、persona・policy・knowledge・instruction・ou
 次のプロバイダーを使う場合は外部 CLI のインストールが必要です:
 
 - `claude` — [Claude Code](https://claude.ai/code)
+- `claude-terminal` — [Claude Code](https://claude.ai/code) を対話型ターミナルセッションで駆動（[`tmux`](https://github.com/tmux/tmux) も必要）
 - `copilot` — [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
 - `cursor` — [Cursor Agent](https://docs.cursor.com/)
 
@@ -186,7 +187,7 @@ workflow ファイルの正式ディレクトリ名は `workflows/` です。
 最小限の `~/.takt/config.yaml` は次の通りです。
 
 ```yaml
-provider: codex    # claude, claude-sdk, codex, opencode, cursor, or copilot
+provider: codex    # claude, claude-sdk, claude-terminal, codex, opencode, cursor, or copilot
 model: gpt-5.5       # プロバイダーにそのまま渡されます
 language: ja        # en or ja
 ```

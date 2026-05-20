@@ -39,6 +39,7 @@ These providers run via SDK (no CLI required, Node.js only):
 These providers require an external CLI:
 
 - `claude` — [Claude Code](https://claude.ai/code)
+- `claude-terminal` — [Claude Code](https://claude.ai/code) driven in an interactive terminal session (also requires [`tmux`](https://github.com/tmux/tmux))
 - `copilot` — [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli)
 - `cursor` — [Cursor Agent](https://docs.cursor.com/)
 
@@ -183,7 +184,7 @@ See the [CLI Reference](./docs/cli-reference.md) for all commands and options.
 Minimal `~/.takt/config.yaml`:
 
 ```yaml
-provider: claude    # claude, claude-sdk, codex, opencode, cursor, or copilot
+provider: claude    # claude, claude-sdk, claude-terminal, codex, opencode, cursor, or copilot
 model: sonnet       # passed directly to provider
 language: en        # en or ja
 ```
