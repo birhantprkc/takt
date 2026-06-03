@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.44.0] - 2026-06-03
+
+### Added
+
+- `kiro` provider added (#773). TAKT can now drive the Kiro CLI as an AI agent provider alongside Claude, Codex, OpenCode, Cursor, and Copilot. Select it with `--provider kiro` or in config. Authentication uses `kiro_api_key` in config (or the `TAKT_KIRO_API_KEY` env var), and the CLI binary can be overridden via `kiro_cli_path` / `TAKT_KIRO_CLI_PATH`.
+- OpenTelemetry observability gained working exporters and richer spans (#753). Building on the span foundation shipped in 0.42.0, observability now emits a local `monitor.json` of per-run workflow metrics (enable with `observability.monitor: true`) and a shadow session log derived from OTel spans (`observability.sessionLogExporter: true`), and the span set was extended to cover phase execution and status-judgment (judge) phases. Exporters are routed per run id and the shadow session log keeps redaction parity with the canonical NDJSON session log, so sensitive agent output stays sanitized. Still off by default behind `observability.enabled: true`.
+
+### Changed
+
+- Coding review extended to all builtin review and development workflows. The coding-review parallel sub-step (the `coding-reviewer` persona with the `review-coding` instruction and `coding-review` output contract) — previously only on `default-peer-review` — is now appended to every builtin review / review-fix workflow and to the parallel reviewer waves of the development workflows (backend, frontend, dual, terraform, and their variants). It is a general-purpose, near-instruction-less pass that flags implementation bugs, regressions, security risks, and missing tests using the model's own coding judgment. The intentionally-minimal `*-mini` and `compound-eye` variants are left unchanged.
+
+### Fixed
+
+- Codex `Reconnecting...` events no longer abort the run (#775). A transient reconnect from the Codex SDK could surface as a fatal provider error and tear down the whole workflow; the Codex client now treats it as a recoverable reconnect and retries.
+- Worktree-clone isolation hardened (#778). Fixes to the `git clone --shared` isolation path and clone execution, including normalized gitdir isolation handling, so worktree-isolated tasks stay properly isolated from the main repository.
+
+### Internal
+
+- Repository quality gates wired into TAKT's own `.takt/config.yaml` so the dogfooded review/dev steps run the build, lint, unit, and mock-E2E checks via a command gate.
+
 ## [0.43.0] - 2026-05-29
 
 ### Added
