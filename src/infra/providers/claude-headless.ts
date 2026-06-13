@@ -24,6 +24,7 @@ function toHeadlessOptions(options: ProviderCallOptions): ClaudeHeadlessCallOpti
     onStream: options.onStream,
     claudeCliPath: resolveClaudeCliPath() ?? undefined,
     outputSchema: options.outputSchema,
+    childProcessEnv: options.childProcessEnv,
   };
 }
 

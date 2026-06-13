@@ -301,4 +301,5 @@ export interface OpenCodeCallOptions {
   onAskUserQuestion?: AskUserQuestionHandler;
   opencodeApiKey?: string;
   interactionTimeoutMs?: number;
+  childProcessEnv?: Readonly<Record<string, string>>;
 }

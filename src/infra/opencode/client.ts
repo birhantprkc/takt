@@ -10,6 +10,10 @@ import { createServer } from 'node:net';
 import type { AgentResponse } from '../../core/models/index.js';
 import { AskUserQuestionDeniedError } from '../../core/workflow/ask-user-question-error.js';
 import { createLogger, getErrorMessage, createStreamDiagnostics, type StreamDiagnostics } from '../../shared/utils/index.js';
+import {
+  getNestedObservabilityEnvFingerprint,
+  runWithNestedObservabilityProcessEnv,
+} from '../../shared/telemetry/index.js';
 import { parseProviderModel } from '../../shared/utils/providerModel.js';
 import {
   buildOpenCodePermissionRuleset,
@@ -85,11 +89,12 @@ const sharedServers = new Map<string, SharedServerEntry>();
 
 async function acquireClient(
   model: string,
-  apiKey?: string,
+  apiKey: string | undefined,
+  childProcessEnv: Readonly<Record<string, string>> | undefined,
   abortSignal?: AbortSignal,
 ): Promise<AcquiredOpenCodeClient> {
   throwIfAborted(abortSignal);
-  const key = buildSharedServerKey(model, apiKey);
+  const key = buildSharedServerKey(model, apiKey, childProcessEnv);
   const entry = getSharedServerEntry(key);
 
   if (entry.initPromise) {
@@ -102,7 +107,7 @@ async function acquireClient(
     return acquireSharedServer(entry.server, abortSignal);
   }
 
-  entry.initPromise = createSharedServer(model, apiKey)
+  entry.initPromise = createSharedServer(model, apiKey, childProcessEnv)
     .then((server) => {
       entry.server = server;
       return server;
@@ -116,8 +121,12 @@ async function acquireClient(
   return acquireSharedServer(server, abortSignal);
 }
 
-function buildSharedServerKey(model: string, apiKey?: string): string {
-  return JSON.stringify([model, apiKey]);
+function buildSharedServerKey(
+  model: string,
+  apiKey: string | undefined,
+  childProcessEnv: Readonly<Record<string, string>> | undefined,
+): string {
+  return JSON.stringify([model, apiKey, getNestedObservabilityEnvFingerprint(childProcessEnv)]);
 }
 
 function getSharedServerEntry(key: string): SharedServerEntry {
@@ -131,17 +140,23 @@ function getSharedServerEntry(key: string): SharedServerEntry {
   return entry;
 }
 
-async function createSharedServer(model: string, apiKey?: string): Promise<SharedServer> {
+async function createSharedServer(
+  model: string,
+  apiKey: string | undefined,
+  childProcessEnv: Readonly<Record<string, string>> | undefined,
+): Promise<SharedServer> {
   const port = await getFreePort();
-  const { client, server } = await createOpencode({
-    port,
-    config: {
-      model,
-      small_model: model,
-      ...(apiKey ? { provider: { opencode: { options: { apiKey } } } } : {}),
-    },
-    timeout: OPENCODE_SERVER_START_TIMEOUT_MS,
-  });
+  const { client, server } = await runWithNestedObservabilityProcessEnv(childProcessEnv, () =>
+    createOpencode({
+      port,
+      config: {
+        model,
+        small_model: model,
+        ...(apiKey ? { provider: { opencode: { options: { apiKey } } } } : {}),
+      },
+      timeout: OPENCODE_SERVER_START_TIMEOUT_MS,
+    })
+  );
 
   const closeServer = (): void => {
     try {
@@ -184,7 +199,7 @@ export async function getOpenCodeSessionSnapshot(
   directory: string,
   apiKey?: string,
 ): Promise<OpenCodeSessionSnapshot> {
-  const { client, release } = await acquireClient(model, apiKey);
+  const { client, release } = await acquireClient(model, apiKey, undefined);
   try {
     const result = await client.session.get({ sessionID, directory });
     if (!result.data) {
@@ -487,8 +502,37 @@ export class OpenCodeClient {
       let opencodeApiClient: OpencodeClient | undefined;
       let sessionId: string | undefined = options.sessionId;
       let promptCompletion: Promise<unknown> | undefined;
+      let promptCompletionWait: Promise<void> | undefined;
       let promptError: string | undefined;
       const interactionTimeoutMs = options.interactionTimeoutMs ?? OPENCODE_INTERACTION_TIMEOUT_MS;
+      const promptCompletionTimeoutMessage = 'OpenCode prompt completion timed out';
+
+      const awaitPromptCompletion = (): Promise<void> => {
+        if (!promptCompletion) {
+          return Promise.resolve();
+        }
+
+        promptCompletionWait ??= (async () => {
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              promptCompletion,
+              new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(() => {
+                  reject(new Error(promptCompletionTimeoutMessage));
+                }, interactionTimeoutMs);
+              }),
+            ]);
+          } catch (error) {
+            promptError ??= getErrorMessage(error);
+          } finally {
+            if (timeoutId !== undefined) {
+              clearTimeout(timeoutId);
+            }
+          }
+        })();
+        return promptCompletionWait;
+      };
 
       const resetIdleTimeout = (): void => {
         if (idleTimeoutId !== undefined) {
@@ -529,7 +573,12 @@ export class OpenCodeClient {
         const parsedModel = parseProviderModel(options.model, 'OpenCode model');
         const fullModel = `${parsedModel.providerID}/${parsedModel.modelID}`;
 
-        const acquired = await acquireClient(fullModel, options.opencodeApiKey, options.abortSignal);
+        const acquired = await acquireClient(
+          fullModel,
+          options.opencodeApiKey,
+          options.childProcessEnv,
+          options.abortSignal,
+        );
         opencodeApiClient = acquired.client;
         release = acquired.release;
         if (streamAbortController.signal.aborted) {
@@ -874,7 +923,7 @@ export class OpenCodeClient {
         if (!success && !streamAbortController.signal.aborted) {
           streamAbortController.abort();
         }
-        await promptCompletion;
+        await awaitPromptCompletion();
         if (promptError !== undefined) {
           if (success) {
             success = false;
@@ -970,7 +1019,7 @@ export class OpenCodeClient {
         if (!streamAbortController.signal.aborted) {
           streamAbortController.abort();
         }
-        await promptCompletion;
+        await awaitPromptCompletion();
         release?.();
       }
     }

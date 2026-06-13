@@ -33,6 +33,7 @@ function toOpenCodeOptions(options: ProviderCallOptions): OpenCodeCallOptions {
     onStream: options.onStream,
     onAskUserQuestion: options.onAskUserQuestion,
     opencodeApiKey: options.opencodeApiKey ?? resolveOpencodeApiKey(),
+    childProcessEnv: options.childProcessEnv,
   };
 }
 
