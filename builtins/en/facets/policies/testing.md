@@ -23,6 +23,7 @@ Every behavior change requires a corresponding test, and every bug fix requires 
 | Behavior change | Test update required. REJECT if missing |
 | Side-effect or state-transition change | Successful path and representative failure paths must be verified. REJECT if failure paths are untested |
 | Contract changes through consolidation or abstraction | Must verify that the contract holds on existing equivalent branches, not only on the new shared path |
+| Parser or configuration boundary changes | Must verify syntactically valid inputs with unexpected shapes, missing values, and isolation from personal configuration |
 | Build (type check) | Build must succeed. REJECT if it fails |
 | Edge cases / boundary values | Test recommended (Warning) |
 
@@ -111,6 +112,17 @@ When a change standardizes a contract through a shared helper, normalizer, build
 | An existing branch is treated as "preserved behavior" without verifying that it does not conflict with the contract introduced by the diff | REJECT |
 | Return / throw / catch / early return paths in the changed function are not enumerated, causing representative failure paths to be missed | REJECT |
 | Existing branches with the same responsibility have tests for return values, side effects, events, and error classification contracts | OK |
+
+## Parser and Configuration Boundary Tests
+
+At boundaries that read external files, configuration, YAML/JSON, or CLI input, testing only the ideal typed input is not sufficient.
+
+| Criteria | Verdict |
+|----------|---------|
+| Array-like fields are not tested with object/null/missing values | REJECT |
+| File/directory checks are not tested with an existing regular file, broken link, or permission error | REJECT |
+| Tests that can inherit existing user or machine configuration do not isolate with an empty config directory or temporary HOME | REJECT |
+| Syntactically valid but contract-invalid shapes are pinned to ignore, normalize, or explicit-error behavior | OK |
 
 ## Test Data and Fixtures
 
