@@ -1,10 +1,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/**
- * Read session NDJSON log records from a workflow execution run.
- * Finds the first canonical .jsonl file whose first record is `workflow_start`.
- */
 export function readSessionRecords(repoPath: string): Array<Record<string, unknown>> {
   const runsDir = join(repoPath, '.takt', 'runs');
   const runDirs = readdirSync(runsDir).sort();

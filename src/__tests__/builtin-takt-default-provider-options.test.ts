@@ -4,14 +4,19 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { normalizeWorkflowConfig } from '../infra/config/loaders/workflowParser.js';
+import { getRepertoireDir } from '../infra/config/paths.js';
 
 interface WorkflowStepRaw {
   name?: string;
   provider_options?: unknown;
   parallel?: WorkflowStepRaw[];
+  output_contracts?: {
+    report?: Array<{ format?: string }>;
+  };
 }
 
 interface BuiltinWorkflowRaw {
+  finding_contract?: unknown;
   workflow_config?: {
     provider_options?: unknown;
   };
@@ -56,6 +61,15 @@ const REVIEW_READONLY_EXTENDS = { extends: 'review-readonly' };
 const REVIEW_WEB_EXTENDS = { extends: 'review-web' };
 const REVIEW_FILES_EXTENDS = { extends: 'review-files' };
 const EDIT_EXTENDS = { extends: 'edit' };
+const PEER_REVIEW_OUTPUT_CONTRACTS = [
+  'architecture-review',
+  'security-review',
+  'qa-review',
+  'testing-review',
+  'pure-review',
+  'coding-review',
+  'ai-antipattern-review',
+] as const;
 
 function workflowDir(locale: 'en' | 'ja'): string {
   return join(process.cwd(), 'builtins', locale, 'workflows');
@@ -71,6 +85,18 @@ function loadProviderOptionsPreset(locale: 'en' | 'ja', name: string): ProviderO
   return parseYaml(readFileSync(filePath, 'utf-8')) as ProviderOptionsPresetRaw;
 }
 
+function outputContractPath(locale: 'en' | 'ja', name: string): string {
+  return join(process.cwd(), 'builtins', locale, 'facets', 'output-contracts', `${name}.md`);
+}
+
+function instructionPath(locale: 'en' | 'ja', name: string): string {
+  return join(process.cwd(), 'builtins', locale, 'facets', 'instructions', `${name}.md`);
+}
+
+function personaPath(locale: 'en' | 'ja', name: string): string {
+  return join(process.cwd(), 'builtins', locale, 'facets', 'personas', `${name}.md`);
+}
+
 function normalizeBuiltinWorkflow(workflow: BuiltinWorkflowRaw, locale: 'en' | 'ja', projectDir?: string) {
   const globalConfigDir = mkdtempSync(join(tmpdir(), 'takt-builtin-provider-options-global-'));
   const originalConfigDir = process.env.TAKT_CONFIG_DIR;
@@ -80,6 +106,7 @@ function normalizeBuiltinWorkflow(workflow: BuiltinWorkflowRaw, locale: 'en' | '
       lang: locale,
       ...(projectDir ? { projectDir } : {}),
       workflowDir: workflowDir(locale),
+      repertoireDir: getRepertoireDir(),
     };
     return normalizeWorkflowConfig({
       ...workflow,
@@ -203,6 +230,83 @@ describe('builtin takt-default provider_options refs', () => {
       );
       expect(steps.get('fix')?.provider_options).toEqual(EDIT_EXTENDS);
       expect(normalizedSteps.get('fix')?.providerOptions).toMatchObject(EDIT_PROVIDER_OPTIONS);
+    });
+
+    it(`${locale} takt-default should not enable Finding Contract`, () => {
+      const workflow = loadBuiltinWorkflow(locale, 'takt-default.yaml');
+      const normalized = normalizeBuiltinWorkflow(workflow, locale);
+
+      expect(workflow.finding_contract).toBeUndefined();
+      expect(normalized.findingContract).toBeUndefined();
+    });
+
+    it(`${locale} peer-review subworkflow should enable Finding Contract`, () => {
+      const workflow = loadBuiltinWorkflow(locale, 'peer-review.yaml');
+      const normalized = normalizeBuiltinWorkflow(workflow, locale);
+
+      expect(workflow.finding_contract).toEqual({
+        ledger_path: '.takt/findings/peer-review.json',
+        raw_findings_path: '.takt/findings/raw',
+        manager: {
+          persona: 'findings-manager',
+          instruction: 'findings-manager',
+          output_contract: 'findings-manager',
+        },
+      });
+      expect(normalized.findingContract).toMatchObject({
+        ledgerPath: '.takt/findings/peer-review.json',
+        rawFindingsPath: '.takt/findings/raw',
+        manager: {
+          persona: 'findings-manager',
+          personaDisplayName: 'findings-manager',
+          personaPath: personaPath(locale, 'findings-manager'),
+          instruction: readFileSync(instructionPath(locale, 'findings-manager'), 'utf-8'),
+          outputContract: readFileSync(outputContractPath(locale, 'findings-manager'), 'utf-8'),
+        },
+      });
+      const reviewers = normalized.steps.find((step) => step.name === 'reviewers');
+      expect(reviewers?.rules?.map((rule) => rule.condition)).toEqual([
+        'all("approved") && findings.open.count == 0 && findings.conflicts.count == 0',
+        'any("needs_fix") && findings.conflicts.count == 0',
+        'findings.conflicts.count == 0 && findings.open.count > 0',
+        expect.stringContaining('findings.conflicts'),
+        'findings.conflicts.count > 0',
+      ]);
+      expect(reviewers?.rules?.[0]).toMatchObject({
+        isAggregateCondition: true,
+        aggregateType: 'all',
+        aggregateConditionText: 'approved',
+        aggregateGuardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0',
+      });
+      expect(reviewers?.rules?.[1]).toMatchObject({
+        isAggregateCondition: true,
+        aggregateType: 'any',
+        aggregateConditionText: 'needs_fix',
+        aggregateGuardCondition: 'findings.conflicts.count == 0',
+      });
+    });
+
+    it(`${locale} peer-review should use Finding Contract-specific output contracts`, () => {
+      const workflow = loadBuiltinWorkflow(locale, 'peer-review.yaml');
+      const reviewers = workflow.steps?.find((step) => step.name === 'reviewers')?.parallel ?? [];
+      const formats = reviewers.flatMap((step) =>
+        (step.output_contracts?.report ?? [])
+          .map((entry) => entry.format)
+          .filter((format): format is string => format !== undefined),
+      );
+
+      expect(formats).toEqual(PEER_REVIEW_OUTPUT_CONTRACTS.map((contract) => `${contract}-finding-contract`));
+
+      for (const contract of PEER_REVIEW_OUTPUT_CONTRACTS) {
+        const findingContractContent = readFileSync(outputContractPath(locale, `${contract}-finding-contract`), 'utf-8');
+        const legacyContent = readFileSync(outputContractPath(locale, contract), 'utf-8');
+
+        expect(findingContractContent).not.toContain('finding_id');
+        expect(findingContractContent).not.toContain('persists');
+        expect(findingContractContent).not.toContain('resolved');
+        expect(findingContractContent).not.toContain('reopened');
+        expect(legacyContent).toContain('finding_id');
+      }
     });
   }
 });
