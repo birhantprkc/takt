@@ -39,6 +39,7 @@ import {
   runFindingManagerForParallelStep,
 } from '../findings/manager-runner.js';
 import { renderFindingLedgerInstructionSummary, renderFindingLedgerReportSummary } from '../findings/context.js';
+import { isNonAiReturnValueRule } from '../evaluation/rule-utils.js';
 
 const log = createLogger('parallel-runner');
 
@@ -235,10 +236,8 @@ export class ParallelRunner {
             childProcessEnv: this.deps.engineOptions.childProcessEnv,
           };
 
-        // Session key uses buildSessionKey (persona:provider) — same as normal steps.
-        // This ensures sessions are shared across steps with the same persona+provider,
-        // while different providers (e.g., claude-eye vs codex-eye) get separate sessions.
-        const subSessionKey = buildSessionKey(subStep, runtime?.providerInfo?.provider);
+        // Session key uses the same resolved provider as Phase 1 options and resume phases.
+        const subSessionKey = buildSessionKey(executableSubStep, subPm.provider);
 
         // Phase 1: main execution (Write excluded if sub-step has report)
         const baseOptions = this.deps.optionsBuilder.buildAgentOptions(executableSubStep, runtime);
@@ -719,12 +718,12 @@ export class ParallelRunner {
       throw new Error(`Invalid finding_contract step "${step.name}": missing invalid manager output rule`);
     }
 
-    const needReplanIndex = rules.findIndex((rule) => rule.returnValue === 'need_replan');
+    const needReplanIndex = rules.findIndex((rule) => isNonAiReturnValueRule(rule, 'need_replan'));
     if (needReplanIndex >= 0) {
       return needReplanIndex;
     }
 
-    const needsFixIndex = rules.findIndex((rule) => rule.returnValue === 'needs_fix');
+    const needsFixIndex = rules.findIndex((rule) => isNonAiReturnValueRule(rule, 'needs_fix'));
     if (needsFixIndex >= 0) {
       return needsFixIndex;
     }

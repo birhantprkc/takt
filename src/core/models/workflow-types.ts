@@ -145,6 +145,8 @@ interface WorkflowStepBase {
   name: string;
   description?: string;
   personaDisplayName: string;
+  providerRoutingPersonaKey?: string;
+  tags?: string[];
   instruction: string;
   delayBeforeMs?: number;
   rules?: WorkflowRule[];
@@ -162,10 +164,14 @@ export interface AgentWorkflowStep extends WorkflowStepBase {
   mcpServers?: Record<string, McpServerConfig>;
   personaPath?: string;
   provider?: ProviderType;
+  providerSpecified?: boolean;
   model?: string;
+  modelSpecified?: boolean;
   promotion?: WorkflowPromotionEntry[];
   requiredPermissionMode?: PermissionMode;
   providerOptions?: StepProviderOptions;
+  directProviderOptions?: StepProviderOptions;
+  workflowProviderOptions?: StepProviderOptions;
   edit?: boolean;
   qualityGates?: QualityGate[];
   structuredOutput?: WorkflowStructuredOutput;
@@ -186,6 +192,7 @@ export interface SystemWorkflowStep extends WorkflowStepBase {
   call?: never;
   overrides?: never;
   persona?: never;
+  tags?: never;
   allowGitCommit?: never;
   session?: 'continue' | 'refresh';
   mcpServers?: never;
@@ -216,6 +223,7 @@ export interface WorkflowCallStep extends WorkflowStepBase {
   overrides?: WorkflowCallOverrides;
   args?: Record<string, WorkflowCallArgValue>;
   persona?: never;
+  tags?: never;
   allowGitCommit?: never;
   session?: never;
   mcpServers?: never;
