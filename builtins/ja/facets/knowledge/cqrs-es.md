@@ -361,6 +361,8 @@ UseCaseが必要なケース:
 
 UseCaseが不要なケース:
 - Controllerからコマンドを1つ送るだけで完結する単純な操作
+- ControllerからQuery側へ問い合わせてレスポンスへ変換するだけの単純な参照
+- 既存リソースの存在確認・スコープ確認後にコマンドを1つ送るだけの操作
 
 | 基準 | 判定 |
 |------|------|
@@ -368,6 +370,7 @@ UseCaseが不要なケース:
 | UseCaseがHTTPリクエスト/レスポンスに依存 | REJECT。UseCaseはプロトコル非依存 |
 | UseCaseがAggregate内部状態を直接変更 | REJECT。CommandGateway経由 |
 | UseCaseがSubscription Queryで結果を待機 | REJECT。分散環境で動作しない。リアクティブポーリングを使う |
+| UseCaseが別の問い合わせ層やコマンド送信への薄い委譲だけで終わる | 削除を検討 |
 
 ## プロジェクション設計
 
@@ -451,6 +454,9 @@ Query側はイベント駆動のPubSubモデルで動作する。Projection が 
 | Controller から Repository を直接参照 | REJECT。UseCase層を経由 |
 | Query側が Command Model を参照 | REJECT |
 | QueryHandler がコマンドを発行 | REJECT |
+| Query側のサービスやハンドラが保存・削除・外部API呼び出しを行う | REJECT |
+| Command と Query を同じサービスに混在させる | REJECT。責務と命名を分離 |
+| Query側で存在確認やスコープ確認を行い、呼び出し元がコマンドを送る | OK |
 
 レイヤー間の型:
 - `application/query/` - Query結果の型（例: `OrderDetail`）
@@ -502,6 +508,18 @@ Aggregate → Event Bus → Projection(@EventHandler) → Repository(Read Model)
                                                           ↑
                                           QueryHandler がここを参照
 ```
+
+### 非同期コールバックと並行制御
+
+非同期処理の完了通知は重複・遅延・順序逆転を前提に設計する。Controller や単一プロセス内のロックではなく、Aggregate の状態遷移とコマンドの冪等性で守る。
+
+| 基準 | 判定 |
+|------|------|
+| Controllerやアプリケーションプロセス内のロックで重複callbackを防ぐ | REJECT。複数インスタンスで効かない |
+| 処理中かどうかをAggregate状態で判断する | OK |
+| callbackの試行IDや世代をAggregateが検証する | OK |
+| 古いcallbackや重複callbackを状態遷移で冪等に無視する | OK |
+| 並行制御がController、UseCase、Aggregateに重複して散らばる | REJECT |
 
 ## 結果整合性
 

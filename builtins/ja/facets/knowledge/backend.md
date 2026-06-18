@@ -65,7 +65,7 @@ data class Order(
 
 ## API層設計（Controller）
 
-Controller は薄く保つ。リクエスト受信 → UseCase委譲 → レスポンス返却のみ。
+Controller は薄く保つ。リクエスト受信、DTO変換、認証・認可境界の解決、UseCaseまたは問い合わせ層への委譲、レスポンス返却に集中する。
 
 ```kotlin
 // CORRECT - Controller は薄い
@@ -207,6 +207,19 @@ fun confirm(confirmedBy: String): OrderConfirmedEvent {
 | ビジネスルール検証がControllerにある | REJECT。UseCase層に |
 | 構造バリデーション（@NotBlank等）がドメインにある | REJECT。API層で |
 | UseCase層のバリデーションがAggregate内にある | REJECT。Read Model参照はUseCase層 |
+
+### 読み取りと書き込みの入口
+
+読み取りと書き込みは入口で分離する。読み取り用の問い合わせ層は副作用を持たず、書き込みはコマンドまたはUseCaseで扱う。
+
+| 基準 | 判定 |
+|------|------|
+| 問い合わせ層が保存・削除・外部呼び出し・コマンド送信を行う | REJECT |
+| 読み取り用のクラス名やメソッド名なのに副作用を持つ | REJECT |
+| 単純な参照APIが問い合わせ層を呼び、レスポンスDTOに変換するだけ | OK |
+| 単純な状態変更APIが構造検証と認可境界の解決後にコマンドを1つ送るだけ | OK |
+| 複数のRead Model参照、外部連携、複数コマンド、結果待機をControllerに置く | REJECT。UseCase層に分離 |
+| UseCaseが別サービスへの薄い委譲だけでドメイン上の判断や調整を持たない | 削除を検討 |
 
 ## エラーハンドリング
 

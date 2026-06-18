@@ -65,7 +65,7 @@ data class Order(
 
 ## API Layer Design (Controller)
 
-Keep Controllers thin. Their only job: receive request → delegate to UseCase → return response.
+Keep Controllers thin. Focus them on receiving requests, DTO conversion, resolving authentication/authorization boundaries, delegating to a UseCase or query boundary, and returning responses.
 
 ```kotlin
 // CORRECT - Thin Controller
@@ -207,6 +207,19 @@ fun confirm(confirmedBy: String): OrderConfirmedEvent {
 | Business rule verification in Controller | REJECT. Belongs in UseCase layer |
 | Structural validation (@NotBlank, etc.) in domain | REJECT. Belongs in API layer |
 | UseCase-level validation inside Aggregate | REJECT. Read Model queries belong in UseCase layer |
+
+### Read and Write Entrypoints
+
+Separate read and write entrypoints. Read-side query boundaries have no side effects; writes are handled by commands or UseCases.
+
+| Criteria | Judgment |
+|----------|----------|
+| Query boundary saves, deletes, calls external services, or dispatches commands | REJECT |
+| Read-oriented class or method names hide side effects | REJECT |
+| Simple read API calls a query boundary and converts to response DTO | OK |
+| Simple state-changing API resolves structural validation and authorization boundary, then dispatches one command | OK |
+| Controller contains multiple Read Model lookups, external integration, multiple commands, or result waiting | REJECT. Separate into UseCase layer |
+| UseCase only delegates to another service or command dispatch without domain coordination | Consider deleting |
 
 ## Error Handling
 
