@@ -210,6 +210,19 @@ Good Projection:
 - Idempotently reconstructible from events
 - Completely independent from Write model
 
+### External Work Triggers
+
+External workers and asynchronous work should start from domain events confirmed by the Aggregate. Application Services and Coordinators must not bundle command dispatch and external side effects in the same control flow.
+
+| Criteria | Judgment |
+|----------|----------|
+| Application Service or Coordinator dispatches a command, then starts external work for the same state transition | REJECT. Separate into an EventHandler for the confirmed event |
+| Aggregate emits an event that represents generation or processing start, and an EventHandler starts external work | OK |
+| EventHandler converts external start failure into a failure command back to the Aggregate | OK |
+| Inputs needed by external work are represented in the event or reloadable through stable identifiers | OK |
+| Inputs needed by external work exist only as local variables during command handling | REJECT. Move them to events or reloadable references |
+| Saga is used only to start simple external work without contention or compensation | REJECT. EventHandler is sufficient |
+
 ## Query Side Design
 
 Query side operates on an event-driven PubSub model. Projections update Read Models via EventHandler, and queries read from Read Models.

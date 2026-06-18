@@ -438,6 +438,19 @@ class InventoryReleaseHandler(private val commandGateway: CommandGateway) {
 | EventHandler 内で Repository に save | REJECT。Projection に分離 |
 | 1クラスに Projection と EventHandler の責務が混在 | REJECT。クラスを分離 |
 
+### 外部処理の起動
+
+外部ワーカーや非同期処理の起動は、Aggregate が確定したドメインイベントを起点にする。Application Service や Coordinator が、コマンド送信と外部副作用を同じ制御フローで束ねない。
+
+| 基準 | 判定 |
+|------|------|
+| Application Service や Coordinator がコマンド送信直後に同じ状態遷移の外部処理を起動する | REJECT。確定済みイベントの EventHandler に分離 |
+| Aggregate が生成開始・処理開始を表すイベントを発行し、EventHandler が外部処理を起動する | OK |
+| 外部処理の起動失敗を EventHandler が失敗コマンドとして Aggregate に戻す | OK |
+| 外部処理に必要な入力がイベントまたは安定したIDから再取得できるデータで表現されている | OK |
+| 外部処理の入力がコマンド処理中のローカル変数にしか存在しない | REJECT。イベントまたは再取得可能な参照へ移す |
+| 競合や補償を持たない単純な外部処理起動に Saga を使う | REJECT。EventHandler で十分 |
+
 ## Query側の設計
 
 Query側はイベント駆動のPubSubモデルで動作する。Projection が EventHandler でRead Modelを更新し、Query側はRead Modelを参照する。
