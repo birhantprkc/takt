@@ -6,6 +6,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.47.0] - 2026-06-18
+
+### Added
+
+- Finding Contract — structured finding lifecycle for review workflows (#816, #826, #839, #840, #842, #845). Review findings are now tracked in a formal ledger (`findings-ledger.json`) with lifecycle states (`new`, `persists`, `resolved`, `reopened`), severity levels, and deduplication. A dedicated `findings-manager` persona reconciles raw findings from multiple reviewers, allocating stable IDs (`F-0001`, `F-0002`, …) and detecting conflicts. New implementation under `src/core/workflow/findings/` (reconciler, store, manager-runner, validation), with finding-contract output contracts for all review types (coding, architecture, security, QA, frontend, testing, terraform, CQRS/ES, pure, AI antipattern). Two new workflows ship with finding contract support: `takt-default-with-fc` and `peer-review-with-fc`. Enable by adding a `finding_contract` section to a workflow YAML.
+- `provider_routing` config for persona, tag, and step-based provider selection (#844, #846). A new `provider_routing` config section routes provider/model/provider_options by three dimensions: `personas` (by raw persona key), `tags` (by step tag), and `steps` (by step name). Resolution priority is step direct > `provider_routing.steps` > `provider_routing.tags` > `provider_routing.personas` > legacy `persona_providers` > workflow > CLI. Configurable in project (`.takt/config.yaml`) or global (`~/.takt/config.yaml`).
+- Step tags on all builtin workflows (#851). Every builtin workflow step now carries a `tags` array (e.g. `plan`, `coding`, `review`, `implementation`, `edit`). Tags are the primary key for `provider_routing.tags`, letting you apply provider/model overrides by category rather than individual step name. Tags are also supported on parallel sub-steps.
+- Trace discovery for OTel spans (#843, #847). New `traceDiscovery` module builds a structured `WorkflowTraceDiscovery` object (service name, runId, workflow name, task metadata, git branch/base info) and searchable query strings, enabling correlation of workflow runs with external observability tools like Grafana Tempo.
+- Trace task metadata enrichment (#827, #829). Task metadata (source, issue/PR numbers, branch, slug, summary) is now extracted into structured `WorkflowTraceTaskMetadata` and propagated into OTel spans and trace discovery output.
+- Named resource resolver for provider options and facets (#820, #824). A secure 3-layer resolver (`namedResourceResolver.ts`) searches `.takt/provider-options/` → `~/.takt/provider-options/` → builtin `provider-options/` directories by bare name with extension fallback (`.yaml`/`.yml`), validating against path traversal and verifying symlinks stay inside allowed directories. Used by the new `extends` keyword.
+
+### Changed
+
+- **BREAKING:** `provider_options.$ref` renamed to `provider_options.extends` (#820, #824). The `$ref` key in step/workflow `provider_options` that referenced shared YAML files has been renamed to `extends`. The value is now a bare name (e.g. `extends: edit`) resolved through the 3-layer named resource resolver, instead of a relative file path (e.g. `$ref: provider-options/edit.yaml`). Custom workflows using `$ref` must be updated. Builtin provider options files moved from `builtins/{lang}/workflows/provider-options/` to `builtins/{lang}/provider-options/`. User overrides go in `.takt/provider-options/` or `~/.takt/provider-options/`.
+- **BREAKING:** `persona_providers` deprecated in favor of `provider_routing` (#844, #846). The `persona_providers` config key still works but is now deprecated. It matches on display name which is fragile; `provider_routing.personas` matches on the raw persona key instead. Migration: move entries from `persona_providers` to `provider_routing.personas`.
+- Report phase tool call detection hardened. The report phase now actively detects and rejects provider tool calls (which are forbidden in this phase), returning a retryable error instead of silently producing broken output. Report file writing logic extracted to a shared `report-writer.ts` module.
+- Review and coding policies strengthened. Review policy expanded with new REJECT conditions for contract coverage, contract consistency, specification completeness, requirement anchoring, and resolution judgment. Coding policy wired into review workflows that were previously missing it (#848).
+- Supervisor instructions overhauled for both regular and maintenance modes, with clearer scoping and validation criteria.
+- Knowledge facets expanded: architecture patterns, backend exception translation scope, CQRS/ES domain patterns.
+
+### Fixed
+
+- Cursor CLI config rename ENOENT on parallel execution (#802, #819). The Cursor CLI intermittently fails with ENOENT when its internal `cli-config.json.tmp` → `cli-config.json` rename races across parallel reviewer steps. TAKT now retries with exponential backoff (up to 8 attempts, 1–30 s delay) instead of treating it as a fatal provider error.
+- OpenCode unavailable-tool loops (#822). The OpenCode provider could loop indefinitely when the agent repeatedly called unavailable tools. A new `UnavailableToolLoopDetector` breaks the session after 2 consecutive unavailable-tool errors, surfacing a clear failure message.
+- Review findings anchored to original requirements (#830). Reviewers could drift from the original task requirements when evaluating findings. Instructions and output contracts now enforce anchoring review judgments against the plan and original task description.
+
+### Internal
+
+- AI antipattern review policy restructured as a standalone facet with finding-contract output contracts.
+- Testing policy facet added with guidance against absence-only tests.
+- README status badges added (#835).
+- 20+ new test files covering finding contract, provider routing, trace discovery, trace task metadata, report phase retry, named resource resolver, workflow spans, and more.
+- Configuration and workflow documentation updated for `provider_routing` and `extends`.
+- `WorkflowEngineSetup` extracted for cleaner engine initialization.
+- `WorkflowRunLoop` enhanced with failure metadata and command gate improvements.
+- Repertoire pack-summary rewritten to support named resource resolution and `extends` references.
+
 ## [0.46.0] - 2026-06-13
 
 ### Added
