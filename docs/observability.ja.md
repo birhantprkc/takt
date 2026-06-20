@@ -145,3 +145,19 @@ npm run analyze:usage -- --format csv .takt/runs/<run> > usage.csv
 | `avg_total_tokens` / `median_total_tokens` / `stddev_total_tokens` | missing usage を除外した call 単位の total token 統計 |
 
 before/after 比較では、それぞれの run directory 群に対して別々にコマンドを実行し、出力された table または CSV を比較します。
+
+## トークン使用量をまとめて確認する
+
+`tools/token-usage.sh` を使うと、worktree とローカルの全ランのトークン使用量をタスク×ステップ単位で一覧できます。
+
+```bash
+./tools/token-usage.sh              # 直近10件（mock除外）
+./tools/token-usage.sh --top 20     # 直近20件
+./tools/token-usage.sh --csv        # CSV出力
+./tools/token-usage.sh --all        # mock/0トークンのランも含む
+./tools/token-usage.sh /path/to/dir # 指定ディレクトリをスキャン
+```
+
+デフォルトでは `../takt-worktrees/` と `.takt/runs/` の両方をスキャンします。`observability.usage_events_phase: true` が設定されている必要があります。
+
+依存: `node`, `jq`

@@ -145,3 +145,19 @@ The output columns are:
 | `avg_total_tokens` / `median_total_tokens` / `stddev_total_tokens` | Per-call total token statistics, excluding missing usage |
 
 For before/after comparisons, run the command separately for each set of run directories and compare the resulting tables or CSV files.
+
+## Summarize token usage across runs
+
+`tools/token-usage.sh` aggregates token usage across all worktree and local runs, broken down by task and step.
+
+```bash
+./tools/token-usage.sh              # latest 10 runs (excludes mock)
+./tools/token-usage.sh --top 20     # latest 20 runs
+./tools/token-usage.sh --csv        # CSV output
+./tools/token-usage.sh --all        # include mock/zero-token runs
+./tools/token-usage.sh /path/to/dir # scan a specific directory
+```
+
+By default it scans both `../takt-worktrees/` and `.takt/runs/`. Requires `observability.usage_events_phase: true` in config.
+
+Dependencies: `node`, `jq`
