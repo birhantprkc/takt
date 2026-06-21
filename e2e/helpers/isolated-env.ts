@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -114,12 +115,28 @@ export function createIsolatedEnv(): IsolatedEnv {
     };
   writeConfigFile(taktDir, config);
 
-  // Create isolated Git config file
+  // Create isolated Git config file — inherit GitHub credential helper
+  // from the real global config so provider tests can push.
+  let credentialLines = '';
+  if (provider !== 'mock') {
+    try {
+      const helpers = execFileSync('git', ['config', '--global', '--get-all', 'credential.https://github.com.helper'], {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+      if (helpers) {
+        credentialLines = helpers.split('\n')
+          .map(h => `  helper = ${h}`)
+          .join('\n');
+        credentialLines = `\n[credential "https://github.com"]\n${credentialLines}`;
+      }
+    } catch {
+      // no credential helper configured — skip
+    }
+  }
   writeFileSync(
     gitConfigPath,
-    ['[user]', '  name = TAKT E2E Test', '  email = e2e@example.com'].join(
-      '\n',
-    ),
+    `[user]\n  name = TAKT E2E Test\n  email = e2e@example.com${credentialLines}`,
   );
 
   // ...process.env inherits all env vars including TAKT_OPENAI_API_KEY (for Codex)
