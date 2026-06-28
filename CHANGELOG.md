@@ -6,6 +6,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.49.0] - 2026-06-28
+
+### Added
+
+- `takt exec` — instant multi-agent exec mode (#880, #893, #908). Start an interactive session without writing workflow YAML by hand. An Assistant agent clarifies the request, `/go` turns the conversation into a generated workflow, Worker agent(s) implement the task, Review agent(s) review the result, a Replanning agent asks the user for direction when needed, and loop detection prevents repeated unproductive cycles. Four builtin presets ship out of the box (`backend`, `frontend`, `dual`, `research`). Use `/setup` during the conversation to edit agents, loop thresholds, presets, and referenced facets; changes persist to `~/.takt/exec.yaml` for the next session. Presets can be saved/deleted at project or global scope, and custom presets can be exported as standalone workflow YAML via the `/setup` menu.
+- `session_key` workflow field. Normal agent steps, parallel sub-steps, and `loop_monitors.judge` now accept `session_key` to share or isolate persona sessions across steps. The runtime key is built as `session_key` plus the resolved provider suffix (e.g. `shared-coder:claude`). When omitted, TAKT uses the persona key or step name as before.
+- External contract verification policies (#891). New policy rules prevent treating compile success or mock success as proof of external service contracts. Added to `existing-system-respect`, `review`, and `testing` policies.
+
+### Fixed
+
+- Team leader decomposition turn limit (#904, #906). The team leader's `decomposeTask` and `requestMoreParts` calls could fail with "Reached maximum number of turns (15)" on larger projects. The hardcoded turn limit has been removed from these read-only decomposition calls.
+- OpenCode unavailable tool loop detection (#886). The `UnavailableToolLoopDetector` was being reset on every non-error tool state, including `running`. Since OpenCode emits `running → error` for each tool call, the running event reset the counter before errors could trigger the threshold. Now only `completed` states reset the counter.
+- OpenCode tool handling in no-tools phases (#887). OpenCode no-tools phases now use wildcard deny, preventing tools from slipping through in tool-free execution phases.
+- OpenCode runtime tool list polarity (#890). OpenCode runtime instructions now use positive tool lists instead of negative lists, reducing confusion about which tools are available.
+- OpenCode non-existent tool calls (#892). Defined a custom TAKT agent for OpenCode to prevent the model from calling non-existent `list` and `task` tools referenced in OpenCode's default few-shot examples.
+
+### Internal
+
+- Product Hunt landing page added under `docs/index.html`.
+- Documentation clarified: TAKT runtime asset boundaries, Headroom is optional, `--no-telemetry` option.
+- `review-web` provider options removed (merged into `review-readonly`).
+
 ## [0.48.0] - 2026-06-21
 
 ### Added
