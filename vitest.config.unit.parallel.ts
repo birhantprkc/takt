@@ -2,14 +2,14 @@ import { defineConfig } from 'vitest/config';
 import {
   commonSrcTestConfig,
   itTestGlobs,
-  serialSrcRunnerConfig,
+  parallelSrcRunnerConfig,
   srcTestInclude,
 } from './vitest.config.shared.js';
 
 export default defineConfig({
   test: {
     ...commonSrcTestConfig,
-    ...serialSrcRunnerConfig,
+    ...parallelSrcRunnerConfig,
     include: srcTestInclude,
     exclude: itTestGlobs,
   },

@@ -1,16 +1,14 @@
 import { defineConfig } from 'vitest/config';
 import {
   commonSrcTestConfig,
-  itTestGlobs,
+  itSerialWorkflowLoaderTestGlobs,
   serialSrcRunnerConfig,
-  srcTestInclude,
 } from './vitest.config.shared.js';
 
 export default defineConfig({
   test: {
     ...commonSrcTestConfig,
     ...serialSrcRunnerConfig,
-    include: srcTestInclude,
-    exclude: itTestGlobs,
+    include: itSerialWorkflowLoaderTestGlobs,
   },
 });
