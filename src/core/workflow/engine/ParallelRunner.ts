@@ -39,7 +39,7 @@ import {
   type FindingManagerRunResult,
   runFindingManagerForParallelStep,
 } from '../findings/manager-runner.js';
-import { renderFindingLedgerInstructionSummary, renderFindingLedgerReportSummary } from '../findings/context.js';
+import { ledgerHasOpenFindings, ledgerHasWaivedFindings, renderFindingLedgerInstructionSummary, renderFindingLedgerReportSummary } from '../findings/context.js';
 import { isNonAiReturnValueRule } from '../evaluation/rule-utils.js';
 
 const log = createLogger('parallel-runner');
@@ -221,6 +221,8 @@ export class ParallelRunner {
                   ledgerCopyPath: findingLedgerCopyPath,
                   ledgerSummary: this.renderFindingLedgerSummary(),
                   reportLedgerSummary: this.renderFindingLedgerReportSummary(),
+                  hasOpenFindings: this.ledgerHasOpenFindings(),
+                  hasWaivedFindings: this.ledgerHasWaivedFindings(),
                   rawFindingsJsonSchema: RawFindingsStructuredOutput.schema,
                 }
               : undefined,
@@ -652,6 +654,20 @@ export class ParallelRunner {
       throw new Error('Finding contract is configured but finding ledger store is not available');
     }
     return this.deps.findingLedgerStore.createRunCopy();
+  }
+
+  private ledgerHasOpenFindings(): boolean {
+    if (!this.deps.findingLedgerStore) {
+      return false;
+    }
+    return ledgerHasOpenFindings(this.deps.findingLedgerStore.loadLedger());
+  }
+
+  private ledgerHasWaivedFindings(): boolean {
+    if (!this.deps.findingLedgerStore) {
+      return false;
+    }
+    return ledgerHasWaivedFindings(this.deps.findingLedgerStore.loadLedger());
   }
 
   private renderFindingLedgerSummary(): string {
