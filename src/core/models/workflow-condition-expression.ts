@@ -297,7 +297,12 @@ export function parseAggregateConditionExpression(value: string): AggregateCondi
  * 連結は単一の when 条件ではない）。
  */
 
-function splitGuardClauses(expression: string): string[] {
+/**
+ * 括弧・引用符（エスケープ含む）を尊重してトップレベルの論理区切りで分割する。
+ * 空節は保持する（壊れた設定の fail-fast 判定は呼び出し側の責務）。
+ * parse / normalize / evaluate が同一のトークナイズを共有するための唯一の実装。
+ */
+export function splitTopLevelClauses(expression: string, separator: '||' | '&&'): string[] {
   const parts: string[] = [];
   let inString = false;
   let depth = 0;
@@ -310,15 +315,40 @@ function splitGuardClauses(expression: string): string[] {
     }
     if (!inString && current === '(') { depth++; continue; }
     if (!inString && current === ')') { depth--; continue; }
-    if (!inString && depth === 0 && expression.slice(index, index + 2) === '&&') {
+    if (!inString && depth === 0 && expression.slice(index, index + 2) === separator) {
       parts.push(expression.slice(start, index).trim());
       start = index + 2;
       index++;
     }
   }
   parts.push(expression.slice(start).trim());
-  return parts.filter((part) => part.length > 0);
+  return parts;
 }
+
+/** 後方の呼び出し向け: && 専用の別名。 */
+export function splitTopLevelAndClauses(expression: string): string[] {
+  return splitTopLevelClauses(expression, '&&');
+}
+
+/** 分割して空節があれば fail-fast する（subject はエラー文の主語）。 */
+export function splitTopLevelClausesOrThrow(
+  expression: string,
+  separator: '||' | '&&',
+  subject: string,
+): string[] {
+  const clauses = splitTopLevelClauses(expression, separator);
+  for (const clause of clauses) {
+    if (clause.length === 0) {
+      throw new Error(`Configuration error: ${subject} "${expression}" contains an empty clause`);
+    }
+  }
+  return clauses;
+}
+
+function splitGuardClauses(expression: string): string[] {
+  return splitTopLevelClausesOrThrow(expression, '&&', 'aggregate guard');
+}
+
 
 export function isWhenConditionExpression(value: string): boolean {
   const trimmed = value.trim();
@@ -329,11 +359,11 @@ export function isWhenConditionExpression(value: string): boolean {
   return closing === trimmed.length - 1;
 }
 
-/** when(<式>) の内側を取り出す。when 形式でなければ trim のみ。 */
+/** when(<式>) の内側を取り出す。when 形式以外の入力は呼び出し側の契約違反として即座に失敗させる。 */
 export function unwrapWhenConditionExpression(value: string): string {
   const trimmed = value.trim();
   if (!isWhenConditionExpression(trimmed)) {
-    return trimmed;
+    throw new Error(`unwrapWhenConditionExpression requires a when(...) condition, got "${value}"`);
   }
   return trimmed.slice('when('.length, -1).trim();
 }
