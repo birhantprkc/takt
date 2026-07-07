@@ -14,7 +14,10 @@ import { resolveOpenCodeAllowedPermissions } from '../opencode/types.js';
 import { resolveOpencodeApiKey } from '../config/index.js';
 import type { AgentResponse } from '../../core/models/index.js';
 import type { PermissionMode } from '../../core/models/index.js';
+import { createLogger } from '../../shared/utils/index.js';
 import type { AgentSetup, Provider, ProviderAgent, ProviderCallOptions, ProviderCompactSessionOptions } from './types.js';
+
+const log = createLogger('opencode-provider');
 
 const OPENCODE_TOOL_NAMING_FALLBACK = [
   'OpenCode tool names are lowercase.',
@@ -38,6 +41,9 @@ function toOpenCodeOptions(options: ProviderCallOptions): OpenCodeCallOptions {
   const model = requireOpenCodeModel(options.model);
 
   const openCodeAllowedTools = options.allowedTools;
+  if (options.imageAttachments && options.imageAttachments.length > 0) {
+    log.info('OpenCode provider does not support imageAttachments; ignoring');
+  }
 
   return {
     cwd: options.cwd,
