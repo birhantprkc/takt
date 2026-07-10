@@ -194,6 +194,24 @@ Sub-steps execute concurrently, and the parent aggregates sub-step matches via `
 - Sub-step `rules` define possible outcomes; `next` is optional (parent handles routing)
 - Parallel sub-steps do not support `promotion`
 
+### Finding Contract manager provider/model
+
+`finding_contract.manager` can set a dedicated provider and model for the synthetic Finding Manager step:
+
+```yaml
+finding_contract:
+  ledger_path: .takt/findings/review.json
+  raw_findings_path: .takt/findings/review/raw
+  manager:
+    persona: findings-manager
+    instruction: findings-manager
+    output_contract: findings-manager
+    provider: codex
+    model: gpt-5.5
+```
+
+When set, these values are applied as step-level `provider` / `model` for the Finding Manager. They take priority over `provider_routing`, deprecated `persona_providers.findings-manager`, workflow defaults, and resolved input provider/model. When neither field is set, the manager keeps the normal workflow step provider/model resolution behavior. Setting only `provider` stops lower-priority model fallback, so the selected provider uses its own default; providers that require an explicit model fail validation.
+
 ### Finding Contract parallel retry failure routing
 
 When a workflow defines `finding_contract`, each parallel parent must declare a deterministic rule for a Finding Manager output that stays semantically invalid after retry. This rule prevents invalid manager output from aborting the workflow or updating the ledger.
