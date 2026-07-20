@@ -24,6 +24,9 @@ import {
   applyRejectedObservationAttachments,
   settleProvisionalsWithCleanEvidence,
 } from './manager-provisional-settlement.js';
+import { collectActiveConflictFindingIds, normalizeMergedManagerPlan } from './manager-plan-normalization.js';
+import { canonicalizeFindingManagerOutput } from './canonicalize.js';
+import { collectRegeneratedConflictIds } from './conflict-identity.js';
 
 interface RejectedObservationPlan {
   attachments: Array<{ targetFindingId: string; rawFindingId: string; reason: string }>;
@@ -68,12 +71,28 @@ export function reconcileCommitPlan(input: {
   pendingRejectedObservations: RawAdmissionEvaluation['pendingRejectedObservations'];
   rawProvenanceByRawFindingId: Map<string, { reviewerStableKey: string; lineageKey: string }>;
   cleanWire: RawFinding[];
-}): { ledger: FindingLedger; landedSpecs: ProvisionalFindingSpec[] } {
-  const settlement = settleProvisionalsWithCleanEvidence({
+  explicitResolvedByMapping: ReadonlyMap<string, string>;
+  explicitPromotedFindingIds: ReadonlySet<string>;
+  recoveryProvisionalRawFindingIds: ReadonlySet<string>;
+  deferredRawFindingIds: ReadonlySet<string>;
+  healthyReviewerStableKeys: ReadonlySet<string>;
+}): { ledger: FindingLedger; landedSpecs: ProvisionalFindingSpec[]; normalizationRejections: string[] } {
+  // ladder マージ（mergeOutputs）は matches / newFindings / conflicts を後着させる。
+  // 閉じる決定との衝突をここで一括正規化し、残った統合の match 転写もこの1回で
+  // 行う（reconciler の最終検証がこの後に走る）。
+  const normalized = normalizeMergedManagerPlan({
     output: input.managerOutput,
+    activeConflictFindingIds: collectActiveConflictFindingIds(input.freshLedger),
+  });
+  const settlement = settleProvisionalsWithCleanEvidence({
+    output: normalized.output,
     cleanRawIds: new Set(input.cleanWire.map((wire) => wire.rawFindingId)),
     wireById: new Map(input.rawFindings.map((wire) => [wire.rawFindingId, wire])),
     freshLedger: input.freshLedger,
+    explicitResolvedByMapping: input.explicitResolvedByMapping,
+    explicitPromotedFindingIds: input.explicitPromotedFindingIds,
+    healthyReviewerStableKeys: input.healthyReviewerStableKeys,
+    replayOrigins: new Map(),
   });
   // clean 証拠による settlement（昇格 / 決定的 same による解消）が確定した
   // provisional への dismiss は不採用にする — clean 証拠が常に管轄裁定より
@@ -82,15 +101,26 @@ export function reconcileCommitPlan(input: {
   const settledFindingIds = new Set([
     ...settlement.promotedFindingIds,
     ...settlement.resolvedByMapping.keys(),
+    ...settlement.resolvedByEvidence.keys(),
   ]);
-  const settledOutput = settledFindingIds.size > 0
-    ? {
-        ...settlement.output,
-        dismissedFindings: settlement.output.dismissedFindings.filter(
-          (dismissed) => !settledFindingIds.has(dismissed.findingId),
-        ),
-      }
-    : settlement.output;
+  // settlement も matches を後着させる（clean new → provisional への match 変換）。
+  // resolution confirmation と衝突した場合に備え、canonicalize をもう一度通す
+  // （純・冪等 — 衝突が無ければ no-op）。
+  const canonicalized = canonicalizeFindingManagerOutput(
+    settledFindingIds.size > 0
+      ? {
+          ...settlement.output,
+          dismissedFindings: settlement.output.dismissedFindings.filter(
+            (dismissed) => !settledFindingIds.has(dismissed.findingId),
+          ),
+        }
+      : settlement.output,
+  );
+  const { output: settledOutput, rejections: normalizationRejections } = dropRegeneratedConflictResolves(
+    canonicalized,
+    input.freshLedger,
+    normalized.rejections,
+  );
   // dismiss と同一ラウンドに同じ主張（stableKey）の raw が再来した場合、その
   // provisional spec を着地させない — 裁定は claim の再発同定キー単位で有効で、
   // 着地を許すと dismissed の傍から同じ claim が新 ID の open provisional として
@@ -117,6 +147,8 @@ export function reconcileCommitPlan(input: {
       ...input.pendingRejectedObservations.map((pending) => pending.item.wire.rawFindingId),
       ...input.anomalySpecs.flatMap((spec) => spec.sourceRawFindingIds),
       ...suppressedSpecs.flatMap((spec) => spec.sourceRawFindingIds),
+      ...input.recoveryProvisionalRawFindingIds,
+      ...input.deferredRawFindingIds,
     ]),
     context: {
       workflowName: input.runInput.workflowName,
@@ -136,7 +168,49 @@ export function reconcileCommitPlan(input: {
       timestamp: input.runInput.timestamp,
     },
   );
-  return { ledger: attached, landedSpecs };
+  return {
+    ledger: attached,
+    landedSpecs,
+    normalizationRejections,
+  };
+}
+
+/**
+ * ladder / settlement / canonicalize が後着させた conflict が、この出力で resolve
+ * 済みの conflict と同じ署名を再生成する場合、その resolve を項目単位で不採用に
+ * する。残すと reconciler が resolve 直後に同じ conflict を active へ戻し、
+ * resolution evidence だけが消えて「採用済みなのに未解決」の記録不整合が残る
+ * （assembleConflictDecisions が組み立て段で行うのと同じ規則の保存時版）。
+ */
+function dropRegeneratedConflictResolves(
+  output: FindingManagerOutput,
+  freshLedger: FindingLedger,
+  priorRejections: readonly string[],
+): { output: FindingManagerOutput; rejections: string[] } {
+  if (output.resolvedConflicts.length === 0) {
+    return { output, rejections: [...priorRejections] };
+  }
+  const regeneratedConflictIds = collectRegeneratedConflictIds(freshLedger.conflicts, output.conflicts);
+  const regenerated = output.resolvedConflicts.filter(
+    (resolved) => regeneratedConflictIds.has(resolved.conflictId),
+  );
+  if (regenerated.length === 0) {
+    return { output, rejections: [...priorRejections] };
+  }
+  return {
+    output: {
+      ...output,
+      resolvedConflicts: output.resolvedConflicts.filter(
+        (resolved) => !regeneratedConflictIds.has(resolved.conflictId),
+      ),
+    },
+    rejections: [
+      ...priorRejections,
+      ...regenerated.map((resolved) => (
+        `conflictDecisions: conflict "${resolved.conflictId}" (resolve) rejected at save time: the same conflict is regenerated by evidence merged after the decision; it stays active`
+      )),
+    ],
+  };
 }
 
 /**
@@ -196,6 +270,7 @@ export function applyCommitLedgerStates(input: {
   baseAnomalySpecs: ReviewerAnomalySpec[];
   pendingRejectedObservations: RawAdmissionEvaluation['pendingRejectedObservations'];
   interpretationResults: Map<string, InterpretationApplicationResult>;
+  interpretationReservations: ReadonlyMap<string, string>;
   observation: FindingObservation;
   verifiedEvidenceCandidates: RawAdmissionEvaluation['verifiedEvidenceCandidates'];
   stopBudgetLimits: ReturnType<typeof resolveStopBudgetLimits>;
@@ -225,6 +300,7 @@ export function applyCommitLedgerStates(input: {
   const applied = markInterpretationsApplied(
     withRejectedObservations,
     input.interpretationResults,
+    input.interpretationReservations,
     input.observation,
   );
   const withPromotions = linkPromotedReviewerAnomalies(applied, input.verifiedEvidenceCandidates);

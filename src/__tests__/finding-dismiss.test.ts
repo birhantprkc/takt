@@ -37,6 +37,7 @@ function provisionalEntry(overrides: Partial<FindingLedgerEntry> = {}): FindingL
       lastObservedAt: { runId: 'run-1', stepName: 'reviewers', timestamp: '2026-07-01T00:00:00.000Z' },
       interpretationEpochs: 0,
       gateEffect: 'block',
+      firstObservedRound: 1,
     },
     ...overrides,
   };
@@ -87,8 +88,35 @@ describe('computeDismissCandidates', () => {
         provisional: { ...provisionalEntry().provisional!, kind: 'reviewer-output-overflow', stableKey: 'stable-3' },
       }),
       provisionalEntry({
+        id: 'F-0010',
+        provisional: {
+          ...provisionalEntry().provisional!,
+          kind: 'reviewer-output-overflow',
+          stableKey: 'stable-10',
+          firstObservedRound: undefined,
+        },
+      }),
+      provisionalEntry({
         id: 'F-0004',
         provisional: { ...provisionalEntry().provisional!, kind: 'manager-budget-exhausted', stableKey: 'stable-4' },
+      }),
+      provisionalEntry({
+        id: 'F-0008',
+        provisional: { ...provisionalEntry().provisional!, kind: 'invalid-location-evidence', stableKey: 'stable-8' },
+      }),
+      provisionalEntry({
+        id: 'F-0009',
+        provisional: {
+          ...provisionalEntry().provisional!,
+          kind: 'raw-adjudication-unresolved',
+          stableKey: 'stable-9',
+          adjudicationAttempts: [1, 2].map((attempt) => ({
+            attempt,
+            replayRawFindingId: `replay-${attempt}`,
+            reason: 'no substantive outcome',
+            at: provisionalEntry().lastSeen,
+          })),
+        },
       }),
       // provisional でない open finding — 候補にしない
       provisionalEntry({ id: 'F-0005', provisional: undefined }),
@@ -96,9 +124,17 @@ describe('computeDismissCandidates', () => {
       provisionalEntry({ id: 'F-0006', status: 'resolved' }),
     ];
 
-    const candidates = computeDismissCandidates(findings);
+    const candidates = computeDismissCandidates({
+      version: 1,
+      workflowName: 'test',
+      nextId: 11,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      findings,
+      rawFindings: [],
+      conflicts: [],
+    });
 
-    expect([...candidates.keys()].sort()).toEqual(['F-0001', 'F-0002']);
+    expect([...candidates.keys()].sort()).toEqual(['F-0001', 'F-0002', 'F-0009']);
     expect(candidates.get('F-0001')).toContain('unverified-locationless');
   });
 });
@@ -252,6 +288,7 @@ describe('runFindingManagerForStep dismiss round trip', () => {
   it('残余 raw ゼロでも dismiss 候補があれば manager を起動し、裁定で完了ゲートが開く', async () => {
     let ledger = makeLedger([provisionalEntry()]);
     const savedValidationReports: unknown[] = [];
+    const reservations = new Set<string>();
     const ledgerStore: FindingLedgerStore = {
       workflowName: 'peer-review',
       loadLedger: () => ledger,
@@ -261,6 +298,12 @@ describe('runFindingManagerForStep dismiss round trip', () => {
         ledger = mutation.ledger;
         return Promise.resolve(mutation);
       },
+      claimAdjudicationReservation: (token) => {
+        if (reservations.has(token)) return false;
+        reservations.add(token);
+        return true;
+      },
+      releaseAdjudicationReservation: (token) => { reservations.delete(token); },
       createRunCopy: () => '/tmp/ledger-copy.json',
       saveRawFindings: () => '/tmp/raw-findings.json',
       saveManagerValidationReport: (report) => { savedValidationReports.push(report); return '/tmp/report.json'; },

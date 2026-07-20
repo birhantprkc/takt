@@ -95,6 +95,10 @@ describe('finding identity case sensitivity', () => {
       cleanRawIds: new Set([wire.rawFindingId]),
       wireById: new Map([[wire.rawFindingId, wire]]),
       freshLedger: ledger([finding('F-0001', 'Parser PATH', true)]),
+      explicitResolvedByMapping: new Map(),
+      explicitPromotedFindingIds: new Set(),
+      healthyReviewerStableKeys: new Set(),
+      replayOrigins: new Map(),
     });
 
     expect(result.promotedFindingIds.size).toBe(0);
@@ -111,6 +115,10 @@ describe('finding identity case sensitivity', () => {
       cleanRawIds: new Set([wire.rawFindingId]),
       wireById: new Map([[wire.rawFindingId, wire]]),
       freshLedger: ledger([target, provisional]),
+      explicitResolvedByMapping: new Map(),
+      explicitPromotedFindingIds: new Set(),
+      healthyReviewerStableKeys: new Set(),
+      replayOrigins: new Map(),
     });
 
     expect(result.resolvedByMapping.size).toBe(0);
@@ -130,12 +138,24 @@ describe('finding identity case sensitivity', () => {
     })[0]!;
     const canonical = canonicalizeReviewerRawFinding(candidate, { ledger: currentLedger }).canonical;
     const ladder: LadderResult = {
+      interpretationReservations: new Map(),
+      deferredRawFindingIds: new Set(),
       pendingSameWithProof: [],
       pendingIndependentNew: [],
       pendingConflicts: [],
       provisionalSpecs: [],
       provisionalByInterpretationKey: new Map(),
-      pendingAppliedReattach: [{ target: { wire, canonical, interpretationKey: 'interpretation-1' } }],
+      recoveryProvisionalInterpretationKeys: new Set(),
+      pendingAppliedReattach: [{
+        target: {
+          wire,
+          canonical,
+          baseInterpretationKey: 'interpretation-base-1',
+          interpretationKey: 'interpretation-1',
+          attemptOrdinal: 1,
+        },
+        applicationResult: 'created',
+      }],
       stats: {} as LadderResult['stats'],
     };
 

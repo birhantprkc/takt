@@ -29,8 +29,9 @@ import { runFindingManagerForStep } from '../core/workflow/findings/manager-runn
 import { createFindingLedgerStore, type FindingManagerValidationReport } from '../core/workflow/findings/store.js';
 import {
   canonicalizeReviewerRawFinding,
-  candidateFromLegacyRawFinding,
-  computeInterpretationKey,
+  candidateFromStoredRawFinding,
+  computeBaseInterpretationKey,
+  computeInterpretationAttemptKey,
   computeLineageKey,
   computeProvisionalStableKey,
   computeRawEvidenceHash,
@@ -38,14 +39,12 @@ import {
   createReviewerRawFindingCandidates,
   toLedgerRawFinding,
 } from '../core/workflow/findings/raw-canonicalization.js';
-import { AmbiguousInterpretationsOutputJsonSchema, RawFindingsOutputJsonSchema, RawFindingsOutputValidationJsonSchema } from '../core/workflow/findings/schemas.js';
-import { RawFindingsStructuredOutput } from '../core/workflow/findings/manager-runner.js';
-import { validateStructuredOutputAgainstSchema } from '../core/workflow/engine/structured-output-schema-validator.js';
+import { AmbiguousInterpretationsOutputJsonSchema } from '../core/workflow/findings/schemas.js';
 import { issueDeterministicSameProofs, verifySameProofAgainstLedger } from '../core/workflow/findings/raw-capabilities.js';
 import { buildFindingsRuleContext as buildFindingsRuleContextWithCwd } from '../core/workflow/findings/context.js';
 import { stopBudgetRoundsCompleted } from '../core/workflow/findings/stop-budget.js';
 import { computeRoundMarker } from '../core/workflow/findings/round-marker.js';
-import { kindForRelation, parseFindingLedger } from '../core/workflow/findings/schemas.js';
+import { createFindingAdjudicationReservation } from './helpers/finding-adjudication-reservation.js';
 import { verifiedSourceQuoteFields } from './helpers/finding-evidence.js';
 
 vi.mock('../agents/agent-usecases.js', () => ({
@@ -130,7 +129,11 @@ interface Harness {
   }) => ReturnType<typeof runFindingManagerForStep>;
 }
 
-function makeHarness(initialLedger: FindingLedger, stopBudget?: { maxRounds?: number; maxMinutes?: number }): Harness {
+function makeHarness(
+  initialLedger: FindingLedger,
+  stopBudget?: { maxRounds?: number; maxMinutes?: number },
+  afterUpdate?: (ledger: FindingLedger) => Promise<void>,
+): Harness {
   let ledger = initialLedger;
   const savedLedgers: FindingLedger[] = [];
   const savedReports: FindingManagerValidationReport[] = [];
@@ -139,7 +142,7 @@ function makeHarness(initialLedger: FindingLedger, stopBudget?: { maxRounds?: nu
     workflowName: 'peer-review',
     loadLedger: () => ledger,
     saveLedger: (next) => { ledger = next; savedLedgers.push(next); },
-    updateLedger: (mutator) => {
+    updateLedger: async (mutator) => {
       if (intercept !== undefined) {
         ledger = intercept(ledger);
         intercept = undefined;
@@ -147,8 +150,10 @@ function makeHarness(initialLedger: FindingLedger, stopBudget?: { maxRounds?: nu
       const mutation = mutator(ledger);
       ledger = mutation.ledger;
       savedLedgers.push(ledger);
-      return Promise.resolve(mutation);
+      await afterUpdate?.(ledger);
+      return mutation;
     },
+    ...createFindingAdjudicationReservation(),
     createRunCopy: () => '/tmp/ledger-copy.json',
     saveRawFindings: () => '/tmp/raw-findings.json',
     saveManagerValidationReport: (report) => {
@@ -352,7 +357,7 @@ describe('ケース2: candidate/canonical 型混同（factory を通らない ob
   it('型 assertion で作った canonical 風 object も runtime で拒否される', () => {
     const invalidCandidate = {
       rawFindingId: 'r', reviewerStableKey: 'k', lineageKey: 'l', evidenceHash: 'h',
-      relation: 'resolution_confirmation', kind: 'resolution_confirmation',
+      relation: 'resolution_confirmation',
       reviewer: 'r', stepName: 's', coherence: 'coherent',
       provenance: { origin: 'reviewer', ambiguityOrigin: false, clarificationAttempted: false, ambiguityCodes: [] },
       familyTag: 'bug', severity: 'high', title: 't', description: 'd', targetFindingId: 'F-0001',
@@ -360,24 +365,23 @@ describe('ケース2: candidate/canonical 型混同（factory を通らない ob
     expect(() => toLedgerRawFinding(invalidCandidate as never)).toThrow(/candidate\/canonical type confusion/);
   });
 
-  it('legacy ledger の raw も同じ factory（candidateFromLegacyRawFinding → canonicalize）を通る', () => {
-    const legacyRaw: RawFinding = {
-      rawFindingId: 'raw-legacy',
+  it('保存済み raw も同じ factory（candidateFromStoredRawFinding → canonicalize）を通る', () => {
+    const storedRaw: RawFinding = {
+      rawFindingId: 'raw-stored',
       stepName: 'reviewers',
       reviewer: 'arch-review',
       familyTag: 'bug',
       severity: 'high',
-      title: 'Legacy issue',
+      title: 'Stored issue',
       location: 'src/a.ts:10',
-      description: 'Legacy body.',
-      kind: 'resolution_confirmation',
+      description: 'Stored body.',
+      relation: 'resolution_confirmation',
       targetFindingId: 'F-0001',
     };
-    const candidate = candidateFromLegacyRawFinding(legacyRaw, REVIEWER_STABLE_KEY);
-    // legacy adapter の中だけは kind → relation の復元が許される。
+    const candidate = candidateFromStoredRawFinding(storedRaw, REVIEWER_STABLE_KEY);
     expect(candidate.relation).toBe('resolution_confirmation');
     const { canonical } = canonicalizeReviewerRawFinding(candidate, { ledger: makeLedger() });
-    expect(canonical.kind).toBe(kindForRelation(canonical.relation));
+    expect(canonical.relation).toBe('resolution_confirmation');
     expect(() => toLedgerRawFinding(canonical)).not.toThrow();
   });
 });
@@ -735,7 +739,8 @@ describe('ケース6: no-op ゲート回避（空配列・unknown id・unsupport
     // して無視される。i-1（欠落）は provisional として残る。
     const context = buildFindingsRuleContext(saved);
     expect(context.provisional.count).toBeGreaterThanOrEqual(1);
-    expect(context.provisional.items.some((item) => item.kind === 'raw-meaning-ambiguous')).toBe(true);
+    // 欠落 raw は裁定未了（RawAdjudicationRecovery 管轄）として保持される
+    expect(context.provisional.items.some((item) => item.kind === 'raw-adjudication-unresolved')).toBe(true);
     const provisional = saved.findings.find((finding) => finding.title === 'Unhandled new issue');
     expect(provisional?.status).toBe('open');
     expect(provisional?.provisional?.gateEffect).toBe('block');
@@ -802,6 +807,7 @@ describe('ケース7: resource exhaustion（435 raw・巨大 description・step 
         ledger = mutation.ledger;
         return Promise.resolve(mutation);
       },
+      ...createFindingAdjudicationReservation(),
       createRunCopy: () => '/tmp/ledger-copy.json',
       saveRawFindings: () => '/tmp/raw-findings.json',
       saveManagerValidationReport: () => '/tmp/manager-report.json',
@@ -897,11 +903,12 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
     familyTag: AMBIGUOUS_FIELDS.familyTag,
   });
   const EVIDENCE_HASH = computeRawEvidenceHash(AMBIGUOUS_FIELDS);
-  const INTERPRETATION_KEY = computeInterpretationKey({
+  const BASE_INTERPRETATION_KEY = computeBaseInterpretationKey({
     reviewerStableKey: REVIEWER_STABLE_KEY,
     lineageKey: LINEAGE_KEY,
     candidateEvidenceHash: EVIDENCE_HASH,
   });
+  const INTERPRETATION_KEY = computeInterpretationAttemptKey(BASE_INTERPRETATION_KEY, 1);
 
   function resolvedTargetLedger(overrides: Partial<FindingLedger> = {}): FindingLedger {
     return makeLedger({
@@ -910,10 +917,12 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
     });
   }
 
-  it('started 保存直後に停止した run の resume は、manager を再呼び出さず interpretation-interrupted provisional にする', async () => {
+  it('started 保存直後に停止した run の resume は、旧 attempt を interrupted にして次 attempt を実行する', async () => {
     const harness = makeHarness(resolvedTargetLedger({
       interpretations: [{
         interpretationKey: INTERPRETATION_KEY,
+        baseInterpretationKey: BASE_INTERPRETATION_KEY,
+        attemptOrdinal: 1,
         reviewerStableKey: REVIEWER_STABLE_KEY,
         lineageKey: LINEAGE_KEY,
         candidateEvidenceHash: EVIDENCE_HASH,
@@ -923,29 +932,42 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
         promptPreconditions: [],
       }],
     }));
+    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'p-1');
+      return interpretationResponse([{
+        decision: 'provisional',
+        rawFindingId: rawId,
+        proofId: '',
+        targetFindingId: '',
+        reason: 'Still ambiguous.',
+      }]);
+    });
 
     const result = await harness.run({ reviewerRawFindings: [AMBIGUOUS_PERSISTS_RAW] });
     expect(result.status).toBe('updated');
-    // manager は再呼び出しされない。
-    expect(executeAgentMock).not.toHaveBeenCalled();
+    expect(executeAgentMock).toHaveBeenCalledOnce();
     const saved = harness.currentLedger();
     const provisional = saved.findings.find((finding) => finding.provisional !== undefined);
-    expect(provisional?.provisional?.kind).toBe('interpretation-interrupted');
+    expect(provisional?.provisional?.kind).toBe('raw-meaning-ambiguous');
     expect(provisional?.status).toBe('open');
-    expect(provisional?.provisional?.interpretationEpochs).toBe(1);
-    expect(saved.interpretations?.filter((record) => record.lineageKey === LINEAGE_KEY)).toHaveLength(1);
+    expect(provisional?.provisional?.interpretationEpochs).toBe(2);
+    expect(saved.interpretations?.filter((record) => record.lineageKey === LINEAGE_KEY)).toHaveLength(2);
+    expect(saved.interpretations?.[0]?.stage).toBe('interpretation_interrupted');
   });
 
   it('completed 保存後に停止した run の resume は、保存済み decision を再利用して manager を再呼び出さない', async () => {
     const harness = makeHarness(resolvedTargetLedger({
       interpretations: [{
         interpretationKey: INTERPRETATION_KEY,
+        baseInterpretationKey: BASE_INTERPRETATION_KEY,
+        attemptOrdinal: 1,
         reviewerStableKey: REVIEWER_STABLE_KEY,
         lineageKey: LINEAGE_KEY,
         candidateEvidenceHash: EVIDENCE_HASH,
         policyVersion: 2,
         stage: 'interpretation_completed',
         startedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:00.000Z' },
+        reservationToken: 'crashed-reservation',
         completedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:01.000Z' },
         validatedDecision: {
           decision: 'create_independent',
@@ -968,6 +990,54 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
     expect(record?.applicationResult).toBe('created');
   });
 
+  it('completed decision の live owner が commit するまで並列呼び出しは同じ decision を適用しない', async () => {
+    let notifyCompleted!: () => void;
+    let releaseOwner!: () => void;
+    const completedSaved = new Promise<void>((resolve) => { notifyCompleted = resolve; });
+    const ownerMayCommit = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    let heldCompleted = false;
+    const harness = makeHarness(resolvedTargetLedger(), undefined, async (saved) => {
+      if (!heldCompleted && saved.interpretations?.some((record) => record.stage === 'interpretation_completed')) {
+        heldCompleted = true;
+        notifyCompleted();
+        await ownerMayCommit;
+      }
+    });
+    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'p-1');
+      return interpretationResponse([{
+        decision: 'create_independent',
+        rawFindingId: rawId,
+        proofId: '',
+        targetFindingId: '',
+        reason: '',
+      }]);
+    });
+
+    const ownerRun = harness.run({ runId: 'owner-run', reviewerRawFindings: [AMBIGUOUS_PERSISTS_RAW] });
+    await completedSaved;
+    const contenderResult = await harness.run({
+      runId: 'contender-run',
+      reviewerRawFindings: [AMBIGUOUS_PERSISTS_RAW],
+    });
+    expect(contenderResult.ledger.interpretations?.[0]?.stage).toBe('interpretation_completed');
+
+    releaseOwner();
+    await ownerRun;
+
+    const saved = harness.currentLedger();
+    const claimFindings = saved.findings.filter((finding) => finding.title === AMBIGUOUS_PERSISTS_RAW.title);
+    expect(claimFindings).toHaveLength(1);
+    expect(claimFindings[0]?.provisional).toBeUndefined();
+    expect(saved.findings.filter((finding) => (
+      finding.status === 'open' && finding.provisional !== undefined
+    ))).toHaveLength(0);
+    expect(buildFindingsRuleContext(saved).provisional.count).toBe(0);
+    expect(saved.rawFindings.some((raw) => raw.rawFindingId.startsWith('contender-run:'))).toBe(true);
+    expect(executeAgentMock).toHaveBeenCalledOnce();
+    expect(saved.interpretations?.[0]?.stage).toBe('ledger_applied');
+  });
+
   it('ledger_applied 済みの解釈は no-op になり、finding ID の二重割当・rawFindingIds の二重追加が起きない', async () => {
     const applied = makeFinding({
       id: 'F-0002',
@@ -981,6 +1051,8 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
       findings: [makeFinding({ status: 'resolved', lifecycle: 'resolved' }), applied],
       interpretations: [{
         interpretationKey: INTERPRETATION_KEY,
+        baseInterpretationKey: BASE_INTERPRETATION_KEY,
+        attemptOrdinal: 1,
         reviewerStableKey: REVIEWER_STABLE_KEY,
         lineageKey: LINEAGE_KEY,
         candidateEvidenceHash: EVIDENCE_HASH,
@@ -1005,7 +1077,7 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
     expect(saved.findings.every((finding) => finding.provisional === undefined)).toBe(true);
   });
 
-  it('applied（provisional_created）後の同一 raw 再来は既存 provisional へ帰属し、別キーの provisional が増殖しない（codex B1 実測ケース）', async () => {
+  it('applied（provisional_created）後の同一 raw 再来は次 attempt を実行し、既存 provisional を更新する', async () => {
     const provisionalStableKey = computeProvisionalStableKey({
       reviewerStableKey: REVIEWER_STABLE_KEY,
       lineageKey: LINEAGE_KEY,
@@ -1027,6 +1099,7 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
         lastObservedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:00.000Z' },
         interpretationEpochs: 1,
         gateEffect: 'block',
+        recoveryReviewerStableKey: REVIEWER_STABLE_KEY,
       },
     });
     const harness = makeHarness(resolvedTargetLedger({
@@ -1034,6 +1107,8 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
       findings: [makeFinding({ status: 'resolved', lifecycle: 'resolved' }), existingProvisional],
       interpretations: [{
         interpretationKey: INTERPRETATION_KEY,
+        baseInterpretationKey: BASE_INTERPRETATION_KEY,
+        attemptOrdinal: 1,
         reviewerStableKey: REVIEWER_STABLE_KEY,
         lineageKey: LINEAGE_KEY,
         candidateEvidenceHash: EVIDENCE_HASH,
@@ -1045,16 +1120,105 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
         promptPreconditions: [],
       }],
     }));
+    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'p-1');
+      return interpretationResponse([{
+        decision: 'provisional',
+        rawFindingId: rawId,
+        proofId: '',
+        targetFindingId: '',
+        reason: 'Still ambiguous.',
+      }]);
+    });
 
     const result = await harness.run({ reviewerRawFindings: [AMBIGUOUS_PERSISTS_RAW] });
     expect(result.status).toBe('updated');
-    expect(executeAgentMock).not.toHaveBeenCalled();
+    expect(executeAgentMock).toHaveBeenCalledOnce();
     const saved = harness.currentLedger();
     const provisionals = saved.findings.filter((finding) => finding.provisional !== undefined);
     // F-0002 と F-0003 の併存（実測された増殖）が起きない。
     expect(provisionals).toHaveLength(1);
     expect(provisionals[0]?.id).toBe('F-0002');
     expect(provisionals[0]?.rawFindingIds.some((id) => id.startsWith('run-2:'))).toBe(true);
+    expect(saved.interpretations?.filter((record) => record.lineageKey === LINEAGE_KEY)).toHaveLength(2);
+  });
+
+  it('reviewer の再報告がない recovery item も provisional 適用後に attempt 1 から 2 へ進む', async () => {
+    const sourceRawId = 'crashed-run:reviewers:1:arch-review:p-1';
+    const sourceRaw: RawFinding = {
+      rawFindingId: sourceRawId,
+      stepName: 'reviewers',
+      reviewer: 'arch-review',
+      familyTag: AMBIGUOUS_PERSISTS_RAW.familyTag,
+      severity: AMBIGUOUS_PERSISTS_RAW.severity,
+      title: AMBIGUOUS_PERSISTS_RAW.title,
+      description: AMBIGUOUS_PERSISTS_RAW.description,
+      relation: AMBIGUOUS_PERSISTS_RAW.relation,
+      targetFindingId: AMBIGUOUS_PERSISTS_RAW.targetFindingId,
+      location: AMBIGUOUS_PERSISTS_RAW.location,
+    };
+    const recovery = makeFinding({
+      id: 'F-0002',
+      title: `Pending interpretation: ${AMBIGUOUS_PERSISTS_RAW.title}`,
+      location: AMBIGUOUS_PERSISTS_RAW.location,
+      description: AMBIGUOUS_PERSISTS_RAW.description,
+      rawFindingIds: [sourceRawId],
+      provisional: {
+        kind: 'manager-budget-exhausted',
+        stableKey: computeProvisionalStableKey({
+          reviewerStableKey: REVIEWER_STABLE_KEY,
+          lineageKey: LINEAGE_KEY,
+          provisionalKind: 'manager-budget-exhausted',
+        }),
+        lineageKey: LINEAGE_KEY,
+        sourceRawFindingIds: [sourceRawId],
+        reason: 'The prior run exhausted its interpretation budget.',
+        firstObservedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:00.000Z' },
+        lastObservedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:00.000Z' },
+        interpretationEpochs: 1,
+        gateEffect: 'block',
+        recoveryReviewerStableKey: REVIEWER_STABLE_KEY,
+      },
+    });
+    const harness = makeHarness(resolvedTargetLedger({
+      nextId: 3,
+      findings: [makeFinding({ status: 'resolved', lifecycle: 'resolved' }), recovery],
+      rawFindings: [makeLedger().rawFindings[0]!, sourceRaw],
+      interpretations: [{
+        interpretationKey: INTERPRETATION_KEY,
+        baseInterpretationKey: BASE_INTERPRETATION_KEY,
+        attemptOrdinal: 1,
+        reviewerStableKey: REVIEWER_STABLE_KEY,
+        lineageKey: LINEAGE_KEY,
+        candidateEvidenceHash: EVIDENCE_HASH,
+        policyVersion: 2,
+        stage: 'ledger_applied',
+        startedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:00.000Z' },
+        appliedAt: { runId: 'crashed-run', stepName: 'reviewers', timestamp: '2026-06-13T23:00:02.000Z' },
+        applicationResult: 'provisional_created',
+        promptPreconditions: [],
+      }],
+    }));
+    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'p-1');
+      return interpretationResponse([{
+        decision: 'create_independent',
+        rawFindingId: rawId,
+        proofId: '',
+        targetFindingId: '',
+        reason: '',
+      }]);
+    });
+
+    await harness.run({ runId: 'attempt-2', reviewerRawFindings: [] });
+
+    const records = harness.currentLedger().interpretations?.filter((record) => (
+      record.lineageKey === LINEAGE_KEY
+    ));
+    expect(executeAgentMock).toHaveBeenCalledOnce();
+    expect(records?.map((record) => record.attemptOrdinal)).toEqual([1, 2]);
+    expect(records?.map((record) => record.stage)).toEqual(['ledger_applied', 'ledger_applied']);
+    expect(records?.map((record) => record.applicationResult)).toEqual(['provisional_created', 'provisional_updated']);
   });
 
   it('同じ confirmation の再適用は冪等（同じ evidence で resolved 済みなら二重 resolve にならない）', async () => {
@@ -1096,41 +1260,6 @@ describe('ケース8: crash/replay（WAL 各段での停止と resume の冪等�
 // 追加必須テスト（設計書 §13）
 // ---------------------------------------------------------------------------
 describe('v2 追加必須テスト', () => {
-  it('relation→kind の4通り（kindForRelation が唯一の導出）', () => {
-    expect(kindForRelation('new')).toBe('issue');
-    expect(kindForRelation('persists')).toBe('issue');
-    expect(kindForRelation('reopened')).toBe('issue');
-    expect(kindForRelation('resolution_confirmation')).toBe('resolution_confirmation');
-  });
-
-  it('kind/relation 矛盾（v3-r3 gemma 実測）は parse 失敗ではなく ambiguity taint になる', () => {
-    const [candidate] = createReviewerRawFindingCandidates([{
-      rawFindingId: 'raw-gemma',
-      familyTag: 'bug',
-      severity: 'high',
-      title: 'Existing issue',
-      location: 'src/a.ts:10',
-      description: 'Confirmed the fix.',
-      suggestion: '',
-      kind: 'issue',
-      relation: 'resolution_confirmation',
-      targetFindingId: 'F-0001',
-    }], {
-      workflowName: 'peer-review',
-      callNamespace: '',
-      parentStepName: 'reviewers',
-      stepIteration: 1,
-      runId: 'run-x',
-      reviewerStepName: 'arch-review',
-      reviewerPersonaKey: 'arch',
-    });
-    const { outcome, canonical } = canonicalizeReviewerRawFinding(candidate!, { ledger: makeLedger() });
-    expect(outcome).toBe('ambiguous');
-    expect(canonical.provenance.ambiguityOrigin).toBe(true);
-    expect(canonical.provenance.ambiguityCodes).toContain('kind-relation-conflict');
-    // canonical の relation/kind は必ず一致する整合ペア。
-    expect(canonical.kind).toBe(kindForRelation(canonical.relation));
-  });
 
   it('correction で relation が整っても taint（priorAmbiguityCodes）は残る', () => {
     const [candidate] = createReviewerRawFindingCandidates([{
@@ -1174,8 +1303,7 @@ describe('v2 追加必須テスト', () => {
       location: 'src/a.ts:10',
       description: 'Existing issue body.',
       suggestion: '',
-      kind: 'issue',
-      relation: 'resolution_confirmation', // kind と矛盾 → ambiguous
+      relation: 'new',
       targetFindingId: 'F-0001',
     }], {
       workflowName: 'peer-review',
@@ -1211,7 +1339,6 @@ describe('v2 追加必須テスト', () => {
     const harness = makeHarness(ledger);
     executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
       const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'r-1');
-      // manager が何を返しても reopen の提案語彙は無い。provisional 提案で着地。
       return interpretationResponse([
         { decision: 'provisional', rawFindingId: rawId, proofId: '', targetFindingId: '', reason: 'Cannot verify reopen claim.' },
       ]);
@@ -1221,29 +1348,20 @@ describe('v2 追加必須テスト', () => {
       reviewerRawFindings: [{
         rawFindingId: 'r-1',
         familyTag: 'bug',
-        severity: 'high',
         title: 'Invalidated issue came back',
         description: 'The invalidated finding is real after all.',
         suggestion: '',
-        // reopened の対象は resolved/waived のみ許容。invalidated（terminal）への
-        // reopened は…detectRawFindingAmbiguities では open でない target への
-        // reopened は coherent 扱いだが、機械分類は reopen を manager に送り、
-        // decisions manager では invalidated target への reopen は不採用になる。
-        // ここでは kind 矛盾で ambiguous にし、ladder 側で reopen 不能を固定する。
-        // location は付けない — この raw の関心は kind/relation 矛盾であって
-        // typed evidence protocol（codex 対策#4）の証跡照合ではないため。
-        kind: 'resolution_confirmation',
         relation: 'reopened',
         targetFindingId: 'F-0001',
       }],
     });
+
     expect(result.status).toBe('updated');
     const saved = harness.currentLedger();
     const target = saved.findings.find((finding) => finding.id === 'F-0001');
     expect(target?.status).toBe('invalidated');
     expect(target?.revision).toBe(2);
-    const provisional = saved.findings.find((finding) => finding.provisional !== undefined);
-    expect(provisional?.status).toBe('open');
+    expect(saved.findings.find((finding) => finding.provisional !== undefined)?.status).toBe('open');
   });
 
   it('clean な後続 raw だけが provisional を確定できる（clean new で confirmed へ昇格、新規 ID は増えない）', async () => {
@@ -1260,13 +1378,10 @@ describe('v2 追加必須テスト', () => {
       reviewerRawFindings: [{
         rawFindingId: 'a-1',
         familyTag: 'bug',
-        severity: 'high',
         title: 'Suspicious behaviour in parser',
         description: 'Something is off.',
         suggestion: '',
-        kind: 'resolution_confirmation', // kind 矛盾 → ambiguous
         relation: 'new',
-        targetFindingId: '',
         ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/b.ts', 7),
       }],
     });
@@ -1332,61 +1447,6 @@ describe('v2 追加必須テスト', () => {
     expect(afterRound2.findings.filter((finding) => finding.title === 'Suspicious behaviour in parser')).toHaveLength(1);
   });
 
-  it('既存 v1 ledger（revision / provisional / interpretations なし）を migration なしで読め、保存後も version 1 のまま', async () => {
-    const legacyLedger = {
-      version: 1,
-      workflowName: 'peer-review',
-      nextId: 2,
-      updatedAt: '2026-06-13T00:00:00.000Z',
-      findings: [{
-        id: 'F-0001',
-        status: 'open',
-        lifecycle: 'new',
-        severity: 'high',
-        title: 'Existing issue',
-        location: 'src/a.ts:10',
-        reviewers: ['arch-review'],
-        rawFindingIds: ['raw-existing'],
-        firstSeen: { runId: 'run-1', stepName: 'reviewers', timestamp: '2026-06-13T00:00:00.000Z' },
-        lastSeen: { runId: 'run-1', stepName: 'reviewers', timestamp: '2026-06-13T00:00:00.000Z' },
-      }],
-      rawFindings: [{
-        rawFindingId: 'raw-existing',
-        stepName: 'reviewers',
-        reviewer: 'arch-review',
-        familyTag: 'bug',
-        severity: 'high',
-        title: 'Existing issue',
-        location: 'src/a.ts:10',
-        description: 'Existing issue body.',
-        // legacy: kind のみ（relation なし）
-        kind: 'issue',
-      }],
-      conflicts: [],
-    };
-    const parsed = parseFindingLedger(legacyLedger);
-    expect(parsed.version).toBe(1);
-    // legacy raw の relation は derive される（kind → relation は legacy 経路のみ）。
-    expect(parsed.rawFindings[0]?.relation).toBe('new');
-
-    const harness = makeHarness(parsed);
-    const confirmation = {
-      rawFindingId: 'c-1',
-      familyTag: 'bug',
-      severity: 'high',
-      title: 'Confirmed fixed',
-      description: 'Verified the fix.',
-      suggestion: '',
-      relation: 'resolution_confirmation',
-      targetFindingId: 'F-0001',
-      ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/a.ts', 10),
-    };
-    const result = await harness.run({ reviewerRawFindings: [confirmation] });
-    expect(result.ledger.version).toBe(1);
-    // 保存後の台帳も v1 schema で round-trip する。
-    expect(() => parseFindingLedger(JSON.parse(JSON.stringify(result.ledger)))).not.toThrow();
-  });
-
   it('B2 誤確定の拒否: path+title が同じでも description / familyTag が異なる clean new は provisional を昇格させない', async () => {
     // round 1: ambiguous raw → provisional。
     const harness = makeHarness(makeLedger({ findings: [], rawFindings: [], nextId: 1 }));
@@ -1405,9 +1465,8 @@ describe('v2 追加必須テスト', () => {
         title: 'Suspicious behaviour in parser',
         description: 'Something is off.',
         suggestion: '',
-        kind: 'resolution_confirmation', // kind 矛盾 → ambiguous
         relation: 'new',
-        targetFindingId: '',
+        targetFindingId: 'F-9999',
         ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/b.ts', 7),
       }],
     });
@@ -1480,12 +1539,15 @@ describe('v2 追加必須テスト', () => {
       targetFindingId: '',
       ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/b.ts', 7),
     };
-    // round 1: kind 矛盾で ambiguous → provisional。
-    await harness.run({ runId: 'run-2', reviewerRawFindings: [{ ...observation, kind: 'resolution_confirmation' }] });
+    // round 1: relation/target 矛盾で ambiguous → provisional。
+    await harness.run({
+      runId: 'run-2',
+      reviewerRawFindings: [{ ...observation, targetFindingId: 'F-9999' }],
+    });
     const provisionalId = harness.currentLedger().findings.find((finding) => finding.provisional !== undefined)?.id;
     expect(provisionalId).toBeDefined();
 
-    // round 2: 完全に同一内容の clean raw（kind 矛盾なし）→ 機械分類の
+    // round 2: 完全に同一内容の clean raw → 機械分類の
     // exact-duplicate match が provisional 自身に付く → 昇格。
     executeAgentMock.mockReset();
     await harness.run({ runId: 'run-3', reviewerRawFindings: [observation] });
@@ -1572,116 +1634,6 @@ describe('v2 追加必須テスト', () => {
     expect(provisional?.provisional).toBeDefined();
   });
 
-  it('v3-r3 resume 実測: legacy kind を含む reviewer 出力は post-hoc 寛容 schema を通過して intake の寛容経路へ到達し、provider-facing schema は strict のまま', async () => {
-    // gemma は訂正1回でも kind 併記をやめない（v3-r3 実測）。schema が kind を
-    // 拒否すると post-hoc validator が sub-step を殺し、設計した梯子1段目
-    // （kind/relation 矛盾 → taint）が到達不能になる。kind は optional として
-    // wire schema を通し、意味の検証は intake（canonicalization）が行う。
-    const consistentKindRaw = {
-      rawFindingId: 'k-1',
-      kind: 'issue',
-      relation: 'new',
-      targetFindingId: '',
-      familyTag: 'bug',
-      severity: 'medium',
-      title: 'Plain issue with legacy kind attached',
-      description: 'A normal observation that still carries the legacy kind field.',
-      suggestion: '',
-      ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/b.ts', 5),
-    };
-    const gemmaConflictRaw = {
-      rawFindingId: 'k-2',
-      kind: 'issue',
-      relation: 'resolution_confirmation',
-      targetFindingId: 'F-0001',
-      familyTag: 'bug',
-      severity: 'high',
-      title: 'Existing issue',
-      location: 'src/a.ts:10',
-      description: 'Confirmed the fix but mislabeled kind (v3-r3 pattern).',
-      suggestion: '',
-    };
-
-    // 1) post-hoc 検証レベル（寛容版 schema — StepExecutor が
-    //    validationSchema ?? schema で選ぶ側）: kind 併記の出力が validator を通る
-    //    （旧: $.rawFindings[0].kind is not allowed by the schema で run が死んでいた）。
-    expect(() => validateStructuredOutputAgainstSchema(
-      { rawFindings: [consistentKindRaw, gemmaConflictRaw] },
-      RawFindingsOutputValidationJsonSchema as unknown as Record<string, unknown>,
-    )).not.toThrow();
-    // enum 外の kind は引き続き拒否される（無制限に緩めてはいない）。
-    expect(() => validateStructuredOutputAgainstSchema(
-      { rawFindings: [{ ...consistentKindRaw, kind: 'bogus' }] },
-      RawFindingsOutputValidationJsonSchema as unknown as Record<string, unknown>,
-    )).toThrow();
-    // provider-facing schema（native 生成拘束用）は strict のまま: kind プロパティは
-    // 存在せず、kind 併記出力はこちらでは通らない（OpenAI/Codex strict 様式維持）。
-    const strictItem = (RawFindingsOutputJsonSchema as { properties: { rawFindings: { items: { properties: Record<string, unknown>; required: string[] } } } })
-      .properties.rawFindings.items;
-    expect(Object.keys(strictItem.properties)).not.toContain('kind');
-    expect(strictItem.required).toEqual(Object.keys(strictItem.properties));
-    // 取り込みステップに実際に付く structured output 契約が両面を正しく運ぶ。
-    expect(RawFindingsStructuredOutput.schema).toBe(RawFindingsOutputJsonSchema);
-    expect(RawFindingsStructuredOutput.validationSchema).toBe(RawFindingsOutputValidationJsonSchema);
-
-    // 2) intake: kind/relation が整合する raw は clean のまま処理され、
-    //    v3-r3 の矛盾 raw（tainted confirmation）は A-1 により provisional に
-    //    ならず監査保存のみ（解消証拠としては不採用、target 不変）。
-    //    claimedKind は正規化監査に残る。
-    const harness = makeHarness(makeLedger());
-    executeAgentMock.mockImplementation(async (_persona, instruction) => {
-      const text = instruction as string;
-      if (text.includes('Ambiguous raw finding interpretation')) {
-        const rawId = extractResidualRawIdFromInterpretationInstruction(text, 'k-2');
-        return interpretationResponse([
-          { decision: 'provisional', rawFindingId: rawId, proofId: '', targetFindingId: '', reason: 'Mislabeled confirmation.' },
-        ]);
-      }
-      // decisions manager: clean residual（k-1）を new として採用。
-      const ids = [...text.matchAll(/"rawFindingId":\s*"([^"]+:k-1)"/g)].map((match) => match[1]!);
-      return {
-        persona: 'findings-manager',
-        status: 'done',
-        content: '',
-        structuredOutput: {
-          rawDecisions: [...new Set(ids)].map((rawFindingId) => ({ rawFindingId, decision: 'new', findingId: '', evidence: 'fresh' })),
-          disputeDecisions: [],
-          conflictDecisions: [],
-          invalidateDecisions: [],
-          duplicateDecisions: [],
-          dismissDecisions: [],
-        },
-        timestamp: new Date(),
-      } as unknown as AgentResponse;
-    });
-
-    const result = await harness.run({ reviewerRawFindings: [consistentKindRaw, gemmaConflictRaw] });
-    expect(result.status).toBe('updated');
-
-    const saved = harness.currentLedger();
-    // 整合 kind の raw は clean 経路で確定 finding になる（taint なし）。
-    const cleanLanded = saved.findings.find((finding) => finding.title === 'Plain issue with legacy kind attached');
-    expect(cleanLanded?.status).toBe('open');
-    expect(cleanLanded?.provisional).toBeUndefined();
-    // 矛盾 raw（tainted confirmation）は A-1 により provisional にならず、
-    // target も不変（解消証拠として不採用、監査のみ）。k-2 は typed evidence
-    // protocol（codex 対策#4）の verbatimExcerpt を持たないため、ladder 入口の
-    // 除外（A-1 完全版テスト参照）より先に admission 段階で不採用になり、監査は
-    // unsupportedRawFindings ではなく rawAdmissionRejections に記録される
-    // （A-1 の2つの単純テストと同じ経路）。
-    expect(saved.findings.every((finding) => finding.provisional === undefined)).toBe(true);
-    expect(saved.findings.find((finding) => finding.id === 'F-0001')?.status).toBe('open');
-    const report = harness.savedReports.at(-1)!;
-    expect(report.rawAdmissionRejections?.some((entry) => entry.rawFindingId.endsWith(':k-2'))).toBe(true);
-    // claimedKind / ambiguity codes が正規化監査メタデータに残る。
-    const record = report.rawNormalizations?.find((entry) => entry.rawFindingId.endsWith(':k-2'));
-    expect(record?.claimedKind).toBe('issue');
-    expect(record?.claimedRelation).toBe('resolution_confirmation');
-    expect(record?.ambiguityCodes).toContain('kind-relation-conflict');
-    // 整合 kind の raw は正規化されていないため監査ノイズにならない。
-    expect(report.rawNormalizations?.some((entry) => entry.rawFindingId.endsWith(':k-1'))).toBe(false);
-  });
-
   it('正規化監査: 矛盾 relation の raw を intake すると、wire は new + targetFindingId なしに正規化されつつ、監査メタデータから元の主張が復元できる', async () => {
     const harness = makeHarness(makeLedger());
     // 解釈フェーズは provisional 提案で流す（この試験の主眼は監査メタデータ）。
@@ -1727,55 +1679,6 @@ describe('v2 追加必須テスト', () => {
     expect(record?.wireTargetFindingId).toBeUndefined();
     expect(record?.ambiguityCodes).toContain('relation-target-mismatch');
     expect(record?.normalizations).toContain('target-dropped-from-wire');
-  });
-
-  it('正規化監査: v3-r3 実測の kind/relation 矛盾も元の kind と ambiguity codes が監査メタデータに残る。無変換の clean raw は記録されない', async () => {
-    const harness = makeHarness(makeLedger());
-    executeAgentMock.mockImplementation(async (_persona, instruction) => {
-      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'g-1');
-      return interpretationResponse([
-        { decision: 'provisional', rawFindingId: rawId, proofId: '', targetFindingId: '', reason: 'Unclear.' },
-      ]);
-    });
-
-    await harness.run({
-      reviewerRawFindings: [
-        {
-          // gemma パターン: kind=issue + relation=resolution_confirmation。
-          rawFindingId: 'g-1',
-          familyTag: 'bug',
-          severity: 'high',
-          title: 'Existing issue',
-          location: 'src/a.ts:10',
-          description: 'Confirmed the fix but mislabeled kind.',
-          suggestion: '',
-          kind: 'issue',
-          relation: 'resolution_confirmation',
-          targetFindingId: 'F-0001',
-        },
-        {
-          // 無変換の clean new（監査ノイズを増やさないことの確認）。
-          rawFindingId: 'clean-1',
-          familyTag: 'security',
-          severity: 'medium',
-          title: 'A clean unrelated issue',
-          location: 'src/b.ts:9',
-          description: 'A separate clean observation.',
-          suggestion: '',
-          relation: 'new',
-          targetFindingId: '',
-        },
-      ],
-      priorStepResponseText: undefined,
-    });
-
-    const report = harness.savedReports.at(-1)!;
-    const record = report.rawNormalizations?.find((entry) => entry.rawFindingId.endsWith(':g-1'));
-    expect(record?.claimedKind).toBe('issue');
-    expect(record?.claimedRelation).toBe('resolution_confirmation');
-    expect(record?.ambiguityCodes).toContain('kind-relation-conflict');
-    // 無変換 raw は記録されない。
-    expect(report.rawNormalizations?.some((entry) => entry.rawFindingId.endsWith(':clean-1'))).toBe(false);
   });
 
   it('正規化監査の write-ahead: intake 後の処理（updateLedger）が例外を投げても、元の主張はディスクの検証レポートから復元できる', async () => {
@@ -1883,35 +1786,6 @@ describe('v2 追加必須テスト', () => {
     }
   });
 
-  it('A-1: tainted な confirmation の location 不成立は provisional を作らず監査保存のみ（v3-r3 実測 F-0015/16/17 の回帰）', async () => {
-    const harness = makeHarness(makeLedger());
-    const result = await harness.run({
-      reviewerRawFindings: [{
-        rawFindingId: 'c-bad',
-        familyTag: 'bug',
-        severity: 'high',
-        title: 'Confirmed fixed',
-        location: 'src/does-not-exist.ts:9',
-        description: 'Verified the fix at a hallucinated location.',
-        suggestion: '',
-        // kind/relation 矛盾で tainted になる confirmation。
-        kind: 'issue',
-        relation: 'resolution_confirmation',
-        targetFindingId: 'F-0001',
-      }],
-    });
-    expect(result.status).toBe('updated');
-    // 解釈フェーズにも decisions manager にも掛からない。
-    expect(executeAgentMock).not.toHaveBeenCalled();
-    const saved = harness.currentLedger();
-    // provisional は作られない（証拠不採用のみ）。target も resolve されない。
-    expect(saved.findings.every((finding) => finding.provisional === undefined)).toBe(true);
-    expect(saved.findings.find((finding) => finding.id === 'F-0001')?.status).toBe('open');
-    // 監査保存はされる。
-    const report = harness.savedReports.at(-1)!;
-    expect(report.rawAdmissionRejections?.some((entry) => entry.rawFindingId.endsWith(':c-bad'))).toBe(true);
-  });
-
   it('A-1: clean な confirmation の location 不成立も従来どおり監査保存のみ（clean/tainted で同一規則）', async () => {
     const harness = makeHarness(makeLedger());
     const result = await harness.run({
@@ -1932,48 +1806,6 @@ describe('v2 追加必須テスト', () => {
     expect(saved.findings.every((finding) => finding.provisional === undefined)).toBe(true);
     expect(saved.findings.find((finding) => finding.id === 'F-0001')?.status).toBe('open');
     expect(harness.savedReports.at(-1)!.rawAdmissionRejections?.some((entry) => entry.rawFindingId.endsWith(':c-clean-bad'))).toBe(true);
-  });
-
-  it('A-1 完全版（codex ブロッカー1）: 行範囲 location で admission を通過する tainted confirmation も provisional にならず監査保存のみ（v3-r3 実データ形）', async () => {
-    const harness = makeHarness(makeLedger());
-    const result = await harness.run({
-      reviewerRawFindings: [{
-        // v3-r3 実台帳 F-0015/16/17 の実データ形: 実在ファイル + 行範囲 location +
-        // kind/relation 矛盾（tainted）+ 機械照合済み verbatimExcerpt（typed
-        // evidence protocol、codex 対策#4）で admission は ok になるため、
-        // 共通ハンドラ（admission 不成立時の除外）は通らず ladder 入口の除外が要る。
-        rawFindingId: 'c-range',
-        familyTag: 'bug',
-        severity: 'high',
-        title: 'Confirmed fixed across a range',
-        description: 'Verified the fix across the cited line range.',
-        suggestion: '',
-        kind: 'issue',
-        relation: 'resolution_confirmation',
-        targetFindingId: 'F-0001',
-        ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/a.ts', 10, 20),
-      }],
-    });
-    expect(result.status).toBe('updated');
-
-    // admission は通過している（location 不成立の監査は積まれない）。
-    const report = harness.savedReports.at(-1)!;
-    expect(report.rawAdmissionRejections?.some((entry) => entry.rawFindingId.endsWith(':c-range')) ?? false).toBe(false);
-    // 行範囲正規化の適用事実は記録される。
-    const normalization = report.rawNormalizations?.find((entry) => entry.rawFindingId.endsWith(':c-range'));
-    expect(normalization?.normalizations).toContain('location-line-range-interpreted');
-    expect(normalization?.ambiguityCodes).toContain('kind-relation-conflict');
-
-    // ladder（解釈フェーズ）にも decisions manager にも掛からない。
-    expect(executeAgentMock).not.toHaveBeenCalled();
-    const saved = harness.currentLedger();
-    // provisional は作られず（blocker なし）、target も不変（resolve されない）。
-    expect(saved.findings.every((finding) => finding.provisional === undefined)).toBe(true);
-    const target = saved.findings.find((finding) => finding.id === 'F-0001');
-    expect(target?.status).toBe('open');
-    expect(target?.rawFindingIds).toEqual(['raw-existing']);
-    // 解消証拠として不採用になった事実は監査に残る。
-    expect(report.unsupportedRawFindings?.some((entry) => entry.rawFindingId.endsWith(':c-range'))).toBe(true);
   });
 
   it('A-3 完全版（codex ブロッカー2）: 同一ラウンドの confirmation が target を閉じた場合、証跡不成立 persists は resolved target へ添付されず provisional にフォールバックする（gate 非減少）', async () => {
@@ -2361,17 +2193,19 @@ describe('ケース9: fixpoint 悪用（意図的に provisional を固定して
       relation: 'persists',
       targetFindingId: 'F-9001',
     });
-    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
-      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'raw-1');
+    executeAgentMock.mockImplementation(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromEitherLocalId(
+        instruction as string,
+        ['raw-1', 'raw-2', 'raw-3'],
+      );
       return interpretationResponse([{ decision: 'provisional', rawFindingId: rawId, proofId: '', targetFindingId: '', reason: 'Cannot determine.' }]);
     });
 
-    // 不正な入力元（または壊れたレビュアー）が意図的に同一の偽装観測を繰り返し、
-    // fixpoint への到達を最短で狙う。round 2 は評価対象フィールドが byte 一致
-    // （rawFindingId のみ差異）のため、evidence hash 一致で manager を再呼び出し
-    // せず既存 provisional に再帰属する（codex B1）。
+    // 同一観測でも recovery attempt は省略できないため、固定化の悪用は
+    // interpretation 上限へ達した後にだけ fixpoint となる。
     await harness.run({ reviewerRawFindings: [ambiguous('raw-1')] });
     await harness.run({ reviewerRawFindings: [ambiguous('raw-2')] });
+    await harness.run({ reviewerRawFindings: [ambiguous('raw-3')] });
 
     const ledger = harness.currentLedger();
     expect(ledger.fixpoint?.reached).toBe(true);
@@ -2412,13 +2246,17 @@ describe('ケース9: fixpoint 悪用（意図的に provisional を固定して
       relation: 'persists',
       targetFindingId: 'F-9001',
     });
-    executeAgentMock.mockImplementationOnce(async (_persona, instruction) => {
-      const rawId = extractResidualRawIdFromInterpretationInstruction(instruction as string, 'raw-1');
+    executeAgentMock.mockImplementation(async (_persona, instruction) => {
+      const rawId = extractResidualRawIdFromEitherLocalId(
+        instruction as string,
+        ['raw-1', 'raw-2', 'raw-3', 'raw-4'],
+      );
       return interpretationResponse([{ decision: 'provisional', rawFindingId: rawId, proofId: '', targetFindingId: '', reason: 'Cannot determine.' }]);
     });
 
     await harness.run({ reviewerRawFindings: [ambiguous('raw-1')] });
     await harness.run({ reviewerRawFindings: [ambiguous('raw-2')] });
+    await harness.run({ reviewerRawFindings: [ambiguous('raw-3')] });
     expect(harness.currentLedger().fixpoint?.reached).toBe(true);
     const findingCountAtFixpoint = harness.currentLedger().findings.length;
 
@@ -2426,7 +2264,7 @@ describe('ケース9: fixpoint 悪用（意図的に provisional を固定して
     // （このユニットテストは manager-runner 単体の性質を見るため、workflow
     // ルーティングそのものは別テストで検証済み）。ここでは「fixpoint 到達済み」
     // という事実そのものが、後続ラウンドの台帳更新ロジックを緩めないことを見る。
-    await harness.run({ reviewerRawFindings: [ambiguous('raw-3')] });
+    await harness.run({ reviewerRawFindings: [ambiguous('raw-4')] });
 
     const ledger = harness.currentLedger();
     // 同一 stableKey の観測が繰り返されただけで、finding は増殖しない。

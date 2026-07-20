@@ -73,7 +73,7 @@ export interface FindingArtifactWriter {
 export interface FindingLedgerStore
   extends LedgerRepository, FindingArtifactWriter, AdjudicationReservationRegistry {}
 
-export type FindingManagerStore = LedgerRepository & Pick<
+export type FindingManagerStore = LedgerRepository & AdjudicationReservationRegistry & Pick<
   FindingArtifactWriter,
   'createRunCopy' | 'saveRawFindings' | 'saveManagerValidationReport'
 >;
@@ -186,7 +186,7 @@ export interface RawAdmissionRejectionReport {
   reason: string;
 }
 
-/** Raw finding decided 'unsupported': it explicitly referenced an existing finding but the reference did not hold up. No finding is created or changed; kept for audit only (see decision-assembly.ts's UnsupportedRawDecision). */
+/** unsupported は target を変えず confirmed finding も作らないため、gate-blocking provisional と併せて裁定根拠を監査する。 */
 export interface UnsupportedRawFindingReport {
   rawFindingId: string;
   targetFindingId: string;
@@ -208,8 +208,6 @@ export interface RawNormalizationAuditRecord {
   claimedRelation?: string;
   /** レビュアが主張した元の targetFindingId。 */
   claimedTargetFindingId?: string;
-  /** レビュアが送ってきた legacy kind（送られていた場合）。 */
-  claimedKind?: string;
   /** canonical に採用された整合 relation。 */
   normalizedRelation: string;
   /** wire（台帳の rawFindings）に残した targetFindingId。undefined = 除外された。 */

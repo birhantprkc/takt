@@ -127,28 +127,36 @@ export const FINDING_PROVISIONAL_KINDS = [
   'interpretation-interrupted',
   'stale-precondition',
   /**
-   * @deprecated 既存台帳の読み取り互換のためだけに残す。新規コードはこの kind をもう生成しない —
-   * location 証拠の不成立（存在しないファイル/範囲外行/verbatimExcerpt
-   * 不一致）は、product gate を無条件に塞ぐ provisional ではなく reviewer
-   * anomaly（二系統台帳の review-integrity 側。REVIEWER_ANOMALY_KINDS 参照）へ
-   * 隔離する（review-integrity protocol: typed evidence protocol + verbatimExcerpt 機械照合）。
-   * 既存 v1 ledger にこの kind の provisional finding が残っていても
-   * migration なしで読める。
+   * manager 出力全体が最終不変条件検証で破棄されたラウンドの残余 raw。
+   * 主張が曖昧だったわけではない（raw-meaning-ambiguous とは別物）ため
+   * interpretation ladder の対象にならない。出口は engine 主導の再裁定
+   * （RawAdjudicationRecovery）と、その枯渇後の NEEDS_ADJUDICATION 停止。
    */
-  'invalid-location-evidence',
+  'manager-output-discarded',
+  /**
+   * 裁定プロセスが substantive outcome へ到達しなかった raw の保持
+   * （decision の却下 / unsupported 裁定 / decision 欠落 / 保存時 stale /
+   * deterministic proof の stale）。主張が曖昧だったわけではないため
+   * interpretation ladder の対象にならない。出口は engine 主導の再裁定
+   * （RawAdjudicationRecovery: 保存済み source raw を fresh ledger に対して
+   * 再裁定）と、attempt 枯渇後の管轄裁定（dismiss 候補化）。
+   */
+  'raw-adjudication-unresolved',
 ] as const;
 export type FindingProvisionalKind = typeof FINDING_PROVISIONAL_KINDS[number];
 
 /**
- * manager の dismissDecisions が却下してよい provisional 種別。
- * 検証不能な主張（locationless）と意味曖昧（raw-meaning-ambiguous）は
- * 内容の管轄裁定が可能だが、overflow / budget / interrupted / stale 系は
- * 「処理失敗の証跡」であり、manager が消すと final gate の迂回路になるため
- * 候補にしない（settlement は clean な後続 raw のみ）。
+ * manager の dismissDecisions が却下してよい provisional 種別の静的な下限。
+ * 実際の候補判定は provisional-recovery.ts の分類が正本 — kind だけでなく
+ * 「その provisional に engine 主導の recovery（解釈 / 再裁定）が残っているか」
+ * を見る。recovery が残る間は候補にせず、枯渇後に内容の管轄裁定へ回す。
+ * overflow / budget / interrupted / stale 系は「処理失敗の証跡」であり、
+ * manager が消すと final gate の迂回路になるため候補にしない。
  */
 export const DISMISSABLE_PROVISIONAL_KINDS = [
   'raw-meaning-ambiguous',
   'unverified-locationless',
+  'raw-adjudication-unresolved',
 ] as const satisfies readonly FindingProvisionalKind[];
 
 /** dismiss 裁定の根拠分類。out_of_scope: finding contract の管轄外（例: 検証結果の評価は final gate の職掌）。unverifiable_claim: 機械検証も後続 clean 証拠も成立し得ない主張。 */
@@ -162,6 +170,37 @@ export interface FindingDismissalRecord {
   decidedAt: FindingObservation;
 }
 
+/**
+ * engine 主導の再裁定（RawAdjudicationRecovery）1回分の失敗記録。成功した
+ * replay は provisional 自体を閉じるため記録されない — 残るのは失敗の監査だけ。
+ * 正本はこの配列（interpretationEpochs とは別系統: あちらは WAL 由来）。
+ */
+export interface FindingAdjudicationAttempt {
+  /** 1 始まりの通し番号。上限は raw-finding-limits.ts の RAW_ADJUDICATION_RECOVERY_LIMITS。 */
+  attempt: number;
+  /** この attempt のために採番した replay 専用 raw ID（過去 raw ID は current として再利用しない）。 */
+  replayRawFindingId: string;
+  reason: string;
+  at: FindingObservation;
+}
+
+export interface FindingActionRecoveryAttempt {
+  attempt: number;
+  reason: string;
+  at: FindingObservation;
+}
+
+export type FindingActionRecovery =
+  | { action: 'invalidate'; findingId: string; evidence: string }
+  | { action: 'waive'; findingId: string; reason: string; evidence: string }
+  | {
+      action: 'duplicate';
+      canonicalFindingId: string;
+      duplicateFindingIds: string[];
+      evidence: string;
+    }
+  | { action: 'dismiss'; findingId: string; basis: FindingDismissalBasis; reason: string };
+
 export interface FindingProvisionalMetadata {
   kind: FindingProvisionalKind;
   /** 決定的な再発同定キー（sha256(reviewerStableKey, lineageKey, kind, policyVersion)）。行番号・runId・タイムスタンプ・LLM 説明文は入れない。 */
@@ -174,6 +213,11 @@ export interface FindingProvisionalMetadata {
   /** この lineage に対する自動 manager 解釈の消費 epoch 数。上限は raw-finding-limits.ts の MAX_INTERPRETATION_EPOCHS_PER_LINEAGE。 */
   interpretationEpochs: number;
   gateEffect: 'block';
+  /** engine 主導の再裁定の失敗履歴（新しい順ではなく attempt 順）。optional — 既存 ledger は migration なしで読める。 */
+  adjudicationAttempts?: FindingAdjudicationAttempt[];
+  actionRecovery?: FindingActionRecovery;
+  actionRecoveryAttempts?: FindingActionRecoveryAttempt[];
+  recoveryReviewerStableKey?: string;
   /**
    * この provisional が最初に観測された manager ラウンド序数（stop budget の
    * roundsCompleted + 1）。loop monitor judge へ渡す滞留ラウンド数の導出に使う。
@@ -207,7 +251,7 @@ export interface FindingLedgerEntry {
   invalidatedEvidence?: string;
   /** Set when status/lifecycle becomes 'superseded' by a duplicateDecisions merge. */
   supersededByFindingId?: string;
-  /** Set when status/lifecycle becomes 'dismissed' by a manager dismissDecisions adjudication (provisional-only; see DISMISSABLE_PROVISIONAL_KINDS). */
+  /** 人間が dismiss 裁定を後から覆しても根拠を監査できるよう、reopen 後も保持する。 */
   dismissal?: FindingDismissalRecord;
   /**
    * 楽観的前提条件（CAS）の版数。エントリを変更するたびに +1。省略時（既存 v1
@@ -239,7 +283,7 @@ export type FindingRecord = FindingLedgerEntry;
  * ラウンド間の「変化なし」を判定できる（fixpoint.ts 参照）。
  */
 export interface FindingLedgerFixpointSnapshot {
-  /** open provisional の意味的同一性キー（stableKey）集合。 */
+  /** recovery の前進を「変化なし」と誤判定して早期停止しないため、attempt の進行もキーへ含める。 */
   provisionalKeys: string[];
   /** provisional でない finding（あらゆる status）の "id:status" 集合。 */
   substantiveEntries: string[];
@@ -375,8 +419,6 @@ export interface FindingLedger {
 export const RAW_AMBIGUITY_CODES = [
   /** relation と targetFindingId の必須・禁止条件が矛盾する。 */
   'relation-target-mismatch',
-  /** legacy kind と relation が矛盾する。 */
-  'kind-relation-conflict',
   /** persists が未知の target を指す。 */
   'persists-target-unknown',
   /** persists が open でない target を指す。 */
@@ -431,9 +473,6 @@ export interface ReviewerRawFindingCandidate {
   readonly relation?: RawFindingRelation;
   readonly targetFindingId?: string;
 
-  /** legacy 入力の検証専用。新規 reviewer contract では出力させない。 */
-  readonly legacyKind?: RawFindingKind;
-
   /**
    * typed evidence protocol(review-integrity protocol)。candidate factory
    * (createReviewerRawFindingCandidates)が provider-facing の flat wire
@@ -455,7 +494,7 @@ export type CanonicalRawFinding =
   | AmbiguousCanonicalRawFinding;
 
 export interface CanonicalRawFindingProvenance {
-  readonly origin: 'reviewer' | 'legacy-ledger' | 'system';
+  readonly origin: 'reviewer' | 'stored-ledger' | 'system';
   readonly ambiguityOrigin: boolean;
   readonly clarificationAttempted: boolean;
   readonly ambiguityCodes: readonly RawAmbiguityCode[];
@@ -469,8 +508,6 @@ interface CanonicalRawFindingBase {
   readonly evidenceHash: string;
 
   readonly relation: RawFindingRelation;
-  readonly kind: RawFindingKind;
-
   readonly reviewer: string;
   readonly stepName: string;
 
@@ -583,6 +620,7 @@ export interface ConfirmationProposal {
 /** 解釈 WAL の段階。 */
 export const INTERPRETATION_STAGES = [
   'interpretation_started',
+  'interpretation_interrupted',
   'interpretation_completed',
   'ledger_applied',
 ] as const;
@@ -599,8 +637,9 @@ export const INTERPRETATION_APPLICATION_RESULTS = [
 export type InterpretationApplicationResult = typeof INTERPRETATION_APPLICATION_RESULTS[number];
 
 export interface FindingInterpretationRecord {
-  /** sha256(reviewerStableKey, lineageKey, candidateEvidenceHash, policyVersion)。 */
   interpretationKey: string;
+  baseInterpretationKey?: string;
+  attemptOrdinal?: number;
   reviewerStableKey: string;
   lineageKey: string;
   candidateEvidenceHash: string;
@@ -608,10 +647,13 @@ export interface FindingInterpretationRecord {
 
   stage: InterpretationStage;
   startedAt: FindingObservation;
+  /** interpretation_completed と finding mutation の間で同じ decision を二重適用させないため、ledger_applied まで所有権を保持する token。 */
+  reservationToken?: string;
 
   promptPreconditions: FindingMutationPrecondition[];
 
   completedAt?: FindingObservation;
+  interruptedAt?: FindingObservation;
   /** schema・capability 検証済みの manager 提案。resume 時はこれを再利用し再問い合わせしない。 */
   validatedDecision?: AmbiguousInterpretation;
 
@@ -619,18 +661,8 @@ export interface FindingInterpretationRecord {
   applicationResult?: InterpretationApplicationResult;
 }
 
-export const RAW_FINDING_KINDS = ['issue', 'resolution_confirmation'] as const;
-export type RawFindingKind = typeof RAW_FINDING_KINDS[number];
-
-// relation is the successor of `kind`: it states the raw finding's relationship
-// to the ledger, not just whether it's an issue observation. 'new' replaces
-// kind=issue with no target; 'persists' and 'reopened' are issue-kind raws that
-// explicitly reference an existing finding (previously indistinguishable from a
-// fresh 'new' issue except by mechanical familyTag+location matching, which the
-// identity contract excludes as an identity signal). 'resolution_confirmation'
-// mirrors kind=resolution_confirmation. `kind` is retained for backward
-// compatibility (see deriveRawFindingRelation in finding-schemas.ts) but
-// `relation` is authoritative wherever both are present.
+// raw finding と台帳の関係を表す現行契約。新規観測、継続、解消確認、再発を
+// 明示し、targetFindingId の要否を一意に決める。
 export const RAW_FINDING_RELATIONS = ['new', 'persists', 'resolution_confirmation', 'reopened'] as const;
 export type RawFindingRelation = typeof RAW_FINDING_RELATIONS[number];
 
@@ -685,15 +717,8 @@ export interface RawFinding {
   location?: string;
   description: string;
   suggestion?: string;
-  /** Omitted means 'issue' (backward compatible with pre-existing ledgers). */
-  kind?: RawFindingKind;
-  /**
-   * This raw finding's relationship to the ledger. Always present after schema
-   * parsing (deriveRawFindingRelation derives it from `kind` for pre-existing
-   * data); optional on the wire type only because reviewers producing the v1
-   * raw findings JSON schema predate this field.
-   */
-  relation?: RawFindingRelation;
+  /** This raw finding's relationship to the ledger. */
+  relation: RawFindingRelation;
   /** Ledger finding id this entry references (required for persists/reopened/resolution_confirmation; forbidden for new). */
   targetFindingId?: string;
   /**

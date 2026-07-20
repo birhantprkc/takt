@@ -4,6 +4,7 @@ import type {
   FindingManagerOutput,
   FindingObservation,
   FindingProvisionalKind,
+  FindingProvisionalMetadata,
   FindingReconcileContext,
   FindingRecord,
   FindingSeverity,
@@ -11,7 +12,10 @@ import type {
 } from './types.js';
 import { assertLedgerIdAllocationInvariant } from './ledger-validation.js';
 import { compareRfc3339Timestamps } from '../../models/rfc3339.js';
-import { validateFindingManagerOutput } from './manager-output-validation.js';
+import {
+  validateFindingManagerOutput,
+  validateManagerActionRecoveryOutput,
+} from './manager-output-validation.js';
 import { computeLineageKey, computeProvisionalStableKey, computeReviewerStableKey } from './raw-canonicalization.js';
 import { countInterpretationEpochs, normalizeProvisionalInterpretationEpochs } from './interpretation-wal.js';
 import { formatConflictId, formatConflictSignature } from './conflict-identity.js';
@@ -35,6 +39,8 @@ export interface ProvisionalFindingSpec {
   description?: string;
   suggestion?: string;
   reviewers: string[];
+  recoveryReviewerStableKey?: string;
+  actionRecovery?: FindingProvisionalMetadata['actionRecovery'];
 }
 
 interface ReconcileFindingLedgerInput {
@@ -173,7 +179,7 @@ function assertResolvedEvidenceRawFindings(input: {
   for (const rawFindingId of input.resolvedRawFindingIds) {
     const currentRawFinding = input.currentRawFindingsById.get(rawFindingId);
     if (currentRawFinding !== undefined) {
-      if (currentRawFinding.kind !== 'resolution_confirmation') {
+      if (currentRawFinding.relation !== 'resolution_confirmation') {
         throw new Error(
           `Resolved finding "${input.finding.id}" references current raw finding "${rawFindingId}" that is not a resolution_confirmation`,
         );
@@ -291,6 +297,7 @@ function withoutResolutionFields(finding: FindingRecord): Omit<FindingRecord, 'r
     // （落とすと CAS の版数が巻き戻り、stale 検出が誤って成功する）。
     ...(finding.revision !== undefined ? { revision: finding.revision } : {}),
     ...(finding.provisional !== undefined ? { provisional: finding.provisional } : {}),
+    ...(finding.dismissal !== undefined ? { dismissal: finding.dismissal } : {}),
     // rejectedObservations の監査添付履歴も解消情報ではないため保持する。
     ...(finding.rejectedObservations !== undefined ? { rejectedObservations: finding.rejectedObservations } : {}),
   };
@@ -419,7 +426,26 @@ function reconcileLedgerConflicts(input: {
   return [...conflictsById.values()];
 }
 
+type ManagerOutputValidator = typeof validateFindingManagerOutput;
+
 export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): FindingLedger {
+  return reconcileFindingLedgerWithValidator(input, validateFindingManagerOutput);
+}
+
+export function reconcileManagerActionRecovery(input: Pick<
+  ReconcileFindingLedgerInput,
+  'previousLedger' | 'managerOutput' | 'context'
+>): FindingLedger {
+  return reconcileFindingLedgerWithValidator(
+    { ...input, rawFindings: [] },
+    validateManagerActionRecoveryOutput,
+  );
+}
+
+function reconcileFindingLedgerWithValidator(
+  input: ReconcileFindingLedgerInput,
+  validateOutput: ManagerOutputValidator,
+): FindingLedger {
   // 手組みの manager output（zod を経ない経路）でも新配列の欠落で落ちないよう
   // 入口で正規化する。
   input = {
@@ -433,7 +459,7 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
       dismissedFindings: input.managerOutput.dismissedFindings ?? [],
     },
   };
-  const validation = validateFindingManagerOutput({
+  const validation = validateOutput({
     previousLedger: input.previousLedger,
     rawFindings: input.rawFindings,
     managerOutput: input.managerOutput,
@@ -510,12 +536,15 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
     assertKnownRawFindings(rawFindingIds, reopened.rawFindingIds);
     markRawFindingIdsUsed(usedRawFindingIds, reopened.rawFindingIds);
     const finding = updatedById.get(reopened.findingId)!;
-    if (finding.status !== 'resolved' && finding.status !== 'waived') {
-      throw new Error(`Cannot reopen finding "${finding.id}" because it is not resolved or waived`);
+    if (finding.status !== 'resolved' && finding.status !== 'waived' && finding.status !== 'dismissed') {
+      throw new Error(`Cannot reopen finding "${finding.id}" because it is not resolved, waived, or dismissed`);
     }
     const reopenedRawFindings = getRawFindings(input.rawFindings, reopened.rawFindingIds);
     const evidence = rawEvidenceFields(reopenedRawFindings);
     const reopenedFinding = withoutResolutionFields(finding);
+    if (finding.status === 'dismissed') {
+      delete reopenedFinding.provisional;
+    }
     updatedById.set(reopened.findingId, {
       ...reopenedFinding,
       status: 'open',
@@ -680,7 +709,7 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
   for (const rawFinding of input.rawFindings) {
     // 解消確認は問題の観測ではない（適用されなかった確認の衝突化は呼び出し元の
     // CAS 経路が担う）ため、fallback provisional の対象にしない。
-    if (rawFinding.kind === 'resolution_confirmation') {
+    if (rawFinding.relation === 'resolution_confirmation') {
       continue;
     }
     if (usedRawFindingIds.has(rawFinding.rawFindingId)
@@ -706,8 +735,8 @@ export function reconcileFindingLedger(input: ReconcileFindingLedgerInput): Find
       familyTag: rawFinding.familyTag,
     });
     provisionalSpecs.push({
-      kind: 'raw-meaning-ambiguous',
-      stableKey: computeProvisionalStableKey({ reviewerStableKey, lineageKey, provisionalKind: 'raw-meaning-ambiguous' }),
+      kind: 'raw-adjudication-unresolved',
+      stableKey: computeProvisionalStableKey({ reviewerStableKey, lineageKey, provisionalKind: 'raw-adjudication-unresolved' }),
       lineageKey,
       sourceRawFindingIds: [rawFinding.rawFindingId],
       reason: `Raw finding "${rawFinding.rawFindingId}" was not referenced by any decision; kept as a gate-blocking provisional instead of being dropped or promoted to a new finding`,
@@ -828,6 +857,10 @@ function applyProvisionalFindingSpecs(input: {
           reason: spec.reason,
           lastObservedAt: observation,
           interpretationEpochs: countInterpretationEpochs(input.ledger, spec.lineageKey),
+          ...(spec.recoveryReviewerStableKey !== undefined
+            ? { recoveryReviewerStableKey: spec.recoveryReviewerStableKey }
+            : {}),
+          ...(spec.actionRecovery !== undefined ? { actionRecovery: spec.actionRecovery } : {}),
         },
       });
       continue;
@@ -868,6 +901,10 @@ function applyProvisionalFindingSpecs(input: {
         lastObservedAt: observation,
         interpretationEpochs: countInterpretationEpochs(input.ledger, spec.lineageKey),
         gateEffect: 'block',
+        ...(spec.recoveryReviewerStableKey !== undefined
+          ? { recoveryReviewerStableKey: spec.recoveryReviewerStableKey }
+          : {}),
+        ...(spec.actionRecovery !== undefined ? { actionRecovery: spec.actionRecovery } : {}),
         // このラウンドの marker は commit 側で reconcile 後に追記されるため、
         // 現在ラウンド序数 = 記録済みラウンド数 + 1。
         firstObservedRound: stopBudgetRoundsCompleted(input.ledger) + 1,

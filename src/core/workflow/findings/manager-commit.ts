@@ -12,6 +12,9 @@ import { resolveReviewIntegrityLimits } from './review-integrity.js';
 import { resolveStopBudgetLimits } from './stop-budget.js';
 import type { ProvisionalLandingReport, RawAdmissionRejectionReport, ReviewerAnomalyLandingReport } from './store.js';
 import type { FindingLedger, FindingObservation } from './types.js';
+import type { InterpretationRecoveryFailure } from './interpretation-recovery.js';
+import { releaseRawAdjudicationReservations } from './raw-adjudication-reservation.js';
+import { releaseInterpretationReservations } from './interpretation-wal.js';
 
 export interface CommitFindingManagerRoundResult {
   nextLedger: FindingLedger;
@@ -32,6 +35,7 @@ export async function commitFindingManagerRound(params: {
   input: RunFindingManagerForStepInput;
   previousLedger: FindingLedger;
   intake: ReviewerIntakeResult;
+  interpretationRecoveryFailures: InterpretationRecoveryFailure[];
   admission: RawAdmissionEvaluation;
   managerDecision: ManagerDecisionStageResult;
   observation: FindingObservation;
@@ -39,23 +43,34 @@ export async function commitFindingManagerRound(params: {
   stopBudgetRoundMarker: string;
   reviewIntegrityLimits: ReturnType<typeof resolveReviewIntegrityLimits>;
 }): Promise<CommitFindingManagerRoundResult> {
-  const mutation = await params.input.ledgerStore.updateLedger((freshLedger) => (
-    buildFindingManagerCommitMutation(params, freshLedger)
-  ));
-  const committed: FindingManagerCommitResult = {
-    nextLedger: mutation.ledger,
-    staleRejections: mutation.result.staleRejections,
-    admissionRejections: mutation.result.admissionRejections,
-    provisionalLandings: mutation.result.provisionalLandings,
-    reviewerAnomalyLandings: mutation.result.reviewerAnomalyLandings,
-  };
-  saveCommitReport(params, committed);
-  return {
-    nextLedger: committed.nextLedger,
-    staleRejectionCount: committed.staleRejections.length,
-    provisionalLandingCount: committed.provisionalLandings.length,
-    reviewerAnomalyLandingCount: committed.reviewerAnomalyLandings.length,
-  };
+  try {
+    const mutation = await params.input.ledgerStore.updateLedger((freshLedger) => (
+      buildFindingManagerCommitMutation(params, freshLedger)
+    ));
+    const committed: FindingManagerCommitResult = {
+      nextLedger: mutation.ledger,
+      staleRejections: mutation.result.staleRejections,
+      admissionRejections: mutation.result.admissionRejections,
+      provisionalLandings: mutation.result.provisionalLandings,
+      reviewerAnomalyLandings: mutation.result.reviewerAnomalyLandings,
+    };
+    saveCommitReport(params, committed);
+    return {
+      nextLedger: committed.nextLedger,
+      staleRejectionCount: committed.staleRejections.length,
+      provisionalLandingCount: committed.provisionalLandings.length,
+      reviewerAnomalyLandingCount: committed.reviewerAnomalyLandings.length,
+    };
+  } finally {
+    releaseInterpretationReservations(
+      params.input.ledgerStore,
+      params.managerDecision.ladder.interpretationReservations,
+    );
+    releaseRawAdjudicationReservations(
+      params.input.ledgerStore,
+      params.managerDecision.rawRecovery.reservationTokens,
+    );
+  }
 }
 
 function saveCommitReport(
@@ -68,10 +83,16 @@ function saveCommitReport(
     runId: input.runId,
     stepName: input.parentStep.name,
     managerOutput: managerDecision.managerOutput,
-    invalidAttempts: managerDecision.invalidAttempts,
+    invalidAttempts: [
+      ...managerDecision.rawRecovery.invalidAttempts,
+      ...managerDecision.invalidAttempts,
+    ],
     staleRejections: committed.staleRejections,
     admissionRejections: committed.admissionRejections,
-    unsupportedRawFindingReports: managerDecision.unsupportedRawFindingReports,
+    unsupportedRawFindingReports: [
+      ...managerDecision.rawRecovery.unsupportedRawFindingReports,
+      ...managerDecision.unsupportedRawFindingReports,
+    ],
     overflowReports: intake.overflowReports,
     provisionalLandings: committed.provisionalLandings,
     reviewerAnomalyLandings: committed.reviewerAnomalyLandings,

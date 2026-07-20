@@ -26,6 +26,7 @@ interface ValidationContext {
   currentRawFindingsById: ReadonlyMap<string, RawFinding>;
   previousRawFindingsById: ReadonlyMap<string, RawFinding>;
   priorStepResponseText?: string;
+  requireCoderWaiverEvidence: boolean;
 }
 
 interface RawFindingDecisionRef {
@@ -35,6 +36,29 @@ interface RawFindingDecisionRef {
 
 export function validateFindingManagerOutput(
   input: ValidateFindingManagerOutputInput,
+): FindingManagerValidationResult {
+  return validateFindingManagerOutputWithPolicy(input, true);
+}
+
+export function validateManagerActionRecoveryOutput(
+  input: Omit<ValidateFindingManagerOutputInput, 'priorStepResponseText'>,
+): FindingManagerValidationResult {
+  const unexpectedDecisionCount = input.managerOutput.matches.length
+    + input.managerOutput.newFindings.length
+    + input.managerOutput.resolvedFindings.length
+    + input.managerOutput.reopenedFindings.length
+    + input.managerOutput.conflicts.length
+    + input.managerOutput.resolvedConflicts.length
+    + (input.managerOutput.disputeNotes ?? []).length;
+  if (unexpectedDecisionCount > 0) {
+    return { ok: false, errors: ['Manager action recovery output may contain only recovered manager actions'] };
+  }
+  return validateFindingManagerOutputWithPolicy(input, false);
+}
+
+function validateFindingManagerOutputWithPolicy(
+  input: ValidateFindingManagerOutputInput,
+  requireCoderWaiverEvidence: boolean,
 ): FindingManagerValidationResult {
   // zod 経路は default([]) で補完されるが、手組みの manager output が渡る
   // 経路も実在するため、入口で新配列の欠落を正規化する。
@@ -56,6 +80,7 @@ export function validateFindingManagerOutput(
     currentRawFindingsById: new Map(input.rawFindings.map((finding) => [finding.rawFindingId, finding])),
     previousRawFindingsById: new Map(input.previousLedger.rawFindings.map((finding) => [finding.rawFindingId, finding])),
     priorStepResponseText: input.priorStepResponseText,
+    requireCoderWaiverEvidence,
   };
   const errors = [
     ...validateRawFindingDecisionRefs(input.managerOutput, context),
@@ -183,7 +208,7 @@ function validateConfirmationRefsOnlyInResolutions(
   ];
   return issueDecisionRefs.flatMap((ref) => {
     const rawFinding = context.currentRawFindingsById.get(ref.rawFindingId);
-    return rawFinding !== undefined && rawFinding.kind === 'resolution_confirmation'
+    return rawFinding !== undefined && rawFinding.relation === 'resolution_confirmation'
       ? [`Resolution confirmation "${ref.rawFindingId}" cannot be cited as issue evidence in ${ref.decision}`]
       : [];
   });
@@ -251,7 +276,7 @@ function validateFindingDecisionRefs(
     ];
   });
   const reopenedErrors = managerOutput.reopenedFindings.flatMap((reopened, index) => (
-    validateFindingDecision(reopened.findingId, `reopenedFindings[${index}]`, 'reopen', ['resolved', 'waived'], context)
+    validateFindingDecision(reopened.findingId, `reopenedFindings[${index}]`, 'reopen', ['resolved', 'waived', 'dismissed'], context)
   ));
   const conflictErrors = managerOutput.conflicts.flatMap((conflict, index) => (
     validateConflictFindingIds(conflict.findingIds, `conflicts[${index}]`, context)
@@ -267,10 +292,12 @@ function validateFindingDecisionRefs(
     // waive は coder の明示的な異議申告が前提: 「Disputed Findings」見出しの
     // ブロック内に対象 finding ID がある場合だけを申告と認める（ID が修正報告
     // 等の別文脈に現れただけでは通さない）。
-    const claimErrors = hasDisputeClaimFor(context.priorStepResponseText, waived.findingId)
+    const claimErrors = !context.requireCoderWaiverEvidence
+      || hasDisputeClaimFor(context.priorStepResponseText, waived.findingId)
       ? []
       : [`Cannot waive finding "${waived.findingId}" because the prior step response contains no dispute claim for it in ${decision}`];
-    const evidenceErrors = FILE_LINE_EVIDENCE_PATTERN.test(waived.evidence)
+    const evidenceErrors = !context.requireCoderWaiverEvidence
+      || FILE_LINE_EVIDENCE_PATTERN.test(waived.evidence)
       ? []
       : [`Waiver evidence for "${waived.findingId}" must cite file:line evidence in ${decision}`];
     return [...statusErrors, ...severityErrors, ...claimErrors, ...evidenceErrors];
@@ -468,7 +495,7 @@ function validateResolvedFindingRawFindingIds(
     }
     const currentRawFinding = context.currentRawFindingsById.get(rawFindingId);
     if (currentRawFinding !== undefined) {
-      if (currentRawFinding.kind !== 'resolution_confirmation') {
+      if (currentRawFinding.relation !== 'resolution_confirmation') {
         return [`Resolved finding "${finding.id}" references current raw finding "${rawFindingId}" that is not a resolution_confirmation`];
       }
       if (currentRawFinding.targetFindingId !== finding.id) {
@@ -488,7 +515,7 @@ function validateResolvedFindingRawFindingIds(
   // レビュアーの沈黙（言及なし）や過去の raw だけでは解消させない。
   const hasCurrentConfirmation = rawFindingIds.some((rawFindingId) => {
     const raw = context.currentRawFindingsById.get(rawFindingId);
-    return raw !== undefined && raw.kind === 'resolution_confirmation' && raw.targetFindingId === finding.id;
+    return raw !== undefined && raw.relation === 'resolution_confirmation' && raw.targetFindingId === finding.id;
   });
   if (!hasCurrentConfirmation) {
     errors.push(

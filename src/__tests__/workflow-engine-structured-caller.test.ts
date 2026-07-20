@@ -174,6 +174,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           title: 'Existing issue',
           location: 'src/a.ts:10',
           description: 'Existing issue body.',
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -816,6 +817,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           severity: 'high',
           title: 'Unresolved issue',
           description: 'Still open in the ledger.',
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -1344,6 +1346,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           severity: 'high',
           title: 'Unresolved issue',
           description: 'Still open in the ledger.',
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -1833,7 +1836,7 @@ describe('WorkflowEngine structured caller defaults', () => {
     expect(result.status).toBe('aborted');
     expect(abortReasons[0]).toContain('Cannot COMPLETE');
     expect(abortReasons[0]).toContain('provisional');
-    expect(abortReasons[0]).toContain('raw-meaning-ambiguous');
+    expect(abortReasons[0]).toContain('raw-adjudication-unresolved');
     expect(abortReasons[0]).toContain('findings.provisional.count');
     void expectedReason;
     const ledger = JSON.parse(readFileSync(ledgerPath, 'utf-8')) as {
@@ -1842,7 +1845,7 @@ describe('WorkflowEngine structured caller defaults', () => {
     expect(ledger.findings.find((f) => f.id === 'F-0001')?.status).toBe('open');
     const provisional = ledger.findings.find((f) => f.provisional !== undefined);
     expect(provisional?.status).toBe('open');
-    expect(provisional?.provisional?.kind).toBe('raw-meaning-ambiguous');
+    expect(provisional?.provisional?.kind).toBe('raw-adjudication-unresolved');
     expect(existsSync(join(resolveFindingLedgerRoot(cwd), '.takt', 'findings', 'raw', 'test-report-dir.reviewers.json'))).toBe(true);
     // 台帳は更新され、run は fix まで進んでいる（黙って止まらない）。
     expect(result.stepOutputs.has('fix')).toBe(true);
@@ -2048,6 +2051,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           title: 'Existing issue',
           location: 'src/a.ts:10',
           description: 'Existing issue body.',
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -2240,6 +2244,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           title: 'Existing issue',
           location: 'src/a.ts:10',
           description: 'Existing issue body.',
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -2383,10 +2388,11 @@ describe('WorkflowEngine structured caller defaults', () => {
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2);
   });
 
-  it('最終防衛線に落ちる manager 出力（closed finding への conflict を reopen なしで参照）は出力ごと破棄され、raw は provisional として着地して run が継続する', async () => {
+  it('最終防衛線に落ちる manager 出力（closed finding への conflict を reopen なしで参照）は mechanical 出力へ縮退し、raw は provisional として着地して run が継続する', async () => {
     // v2: 旧実装の invalid_manager_output（run-level 失敗 + 迂回ルール自動選択）は
-    // 廃止。台帳不変条件に反する出力は捨てられ、raw は gate-blocking provisional と
-    // して着地する。workflow rules は findings.provisional.count でルーティングできる。
+    // 廃止。台帳不変条件に反する出力は LLM 判断だけを失って機械分類の確定分へ
+    // 縮退し、残余 raw は gate-blocking provisional として着地する。workflow rules は
+    // findings.provisional.count でルーティングできる。
     const { abortReasons, initialLedger, ledgerPath, ledgerUpdated, result } = await runInvalidManagerRetryFailureWithRules([
       {
         condition: 'when(findings.provisional.count > 0)',
@@ -2404,13 +2410,14 @@ describe('WorkflowEngine structured caller defaults', () => {
       findings: Array<{ id: string; status: string; provisional?: { kind: string } }>;
       conflicts: unknown[];
     };
-    // F-0001 は resolved のまま（conflict も立たない — 出力ごと破棄）。
+    // F-0001 は resolved のまま（conflict も立たない — LLM 判断は破棄）。
     expect(ledger.findings.find((f) => f.id === 'F-0001')?.status).toBe('resolved');
     expect(ledger.conflicts).toEqual([]);
-    // raw-recurrence は provisional として台帳に残る（黙って消えない）。
+    // raw-recurrence は provisional として台帳に残る（黙って消えない）。曖昧だった
+    // わけではないので解釈ラダー対象外の manager-output-discarded で着地する。
     const provisional = ledger.findings.find((f) => f.provisional !== undefined);
     expect(provisional?.status).toBe('open');
-    expect(provisional?.provisional?.kind).toBe('raw-meaning-ambiguous');
+    expect(provisional?.provisional?.kind).toBe('manager-output-discarded');
     void initialLedger;
     expect(ledgerUpdated).toHaveBeenCalledTimes(1);
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2);
@@ -2425,6 +2432,7 @@ describe('WorkflowEngine structured caller defaults', () => {
       severity: 'high' as const,
       title: 'Existing issue',
       description: 'The workflow cannot route on open findings.',
+      relation: 'new' as const,
     };
     const initialLedger = {
       version: 1,
@@ -2637,6 +2645,7 @@ describe('WorkflowEngine structured caller defaults', () => {
           severity: 'high' as const,
           title: 'Existing issue',
           description: previousEvidenceInjection,
+          relation: 'new',
         },
       ],
       conflicts: [],
@@ -2759,131 +2768,9 @@ describe('WorkflowEngine structured caller defaults', () => {
     expect(ledger.findings).toContainEqual(expect.objectContaining({ id: 'F-0001', status: 'open' }));
     const provisional = ledger.findings.find((f) => f.title === 'Current issue');
     expect(provisional?.status).toBe('open');
-    expect(provisional?.provisional?.kind).toBe('raw-meaning-ambiguous');
+    expect(provisional?.provisional?.kind).toBe('raw-adjudication-unresolved');
     // reviewer 1回 + manager 1回（v2: 再問い合わせ無し）。
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2);
-  });
-
-  it('provider へ渡る raw findings schema は strict（kind 無し・全 required）のまま、kind 併記出力は post-hoc 寛容検証を通過して intake に届く', async () => {
-    // codex 検証ブロッカー対応の2面分離を engine 経路で固定する:
-    // (1) native structured output の生成拘束用に provider が受け取る
-    //     options.outputSchema は strict 様式（kind プロパティ無し・全 properties
-    //     required — OpenAI/Codex はこれを要求し、違反 schema は生成前に拒否される）。
-    // (2) それでも formless/劣化経路の弱いモデルが kind を併記してきた場合
-    //     （v3-r3 resume 実測）、post-hoc 検証は寛容版 schema で通し、intake の
-    //     canonicalization（kind/relation 整合検証）に到達する。
-    let capturedOutputSchema: Record<string, unknown> | undefined;
-    vi.mocked(runAgent).mockImplementation(async (persona, instruction, options) => {
-      options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
-      const schemaText = options?.outputSchema ? JSON.stringify(options.outputSchema) : '';
-      if (schemaText.includes('"rawFindings"')) {
-        capturedOutputSchema = options?.outputSchema as Record<string, unknown>;
-        return {
-          persona,
-          status: 'done',
-          content: 'Review report body.',
-          structuredOutput: {
-            rawFindings: [{
-              rawFindingId: 'raw-1',
-              // strict schema は kind を含まないが、弱いモデルは併記してくる。
-              kind: 'issue',
-              relation: 'new',
-              targetFindingId: '',
-              familyTag: 'bug',
-              severity: 'high',
-              title: 'Issue reported with legacy kind attached',
-              description: 'A real problem carrying the legacy kind field.',
-              suggestion: '',
-              ...verifiedSourceQuoteFields(cwd, 'src/current.ts', 1),
-            }],
-          },
-          timestamp: new Date('2026-06-13T00:00:01.000Z'),
-        };
-      }
-      if (persona === 'findings-manager') {
-        const matches = [...instruction.matchAll(/"rawFindingId":\s*"([^"]+:raw-1)"/g)];
-        const rawFindingId = matches.at(-1)?.[1] ?? '';
-        return {
-          persona,
-          status: 'done',
-          content: '',
-          structuredOutput: {
-            rawDecisions: [{ rawFindingId, decision: 'new', findingId: '', evidence: 'Fresh observation.' }],
-            disputeDecisions: [],
-            conflictDecisions: [],
-            invalidateDecisions: [],
-            duplicateDecisions: [],
-            dismissDecisions: [],
-          },
-          timestamp: new Date('2026-06-13T00:00:02.000Z'),
-        };
-      }
-      return { persona, status: 'done', content: 'ok', timestamp: new Date('2026-06-13T00:00:03.000Z') };
-    });
-
-    const config: WorkflowConfig = {
-      name: 'finding-schema-split-test',
-      maxSteps: 2,
-      initialStep: 'reviewers',
-      findingContract: {
-        ledgerPath: '.takt/findings/peer-review.json',
-        rawFindingsPath: '.takt/findings/raw',
-        manager: {
-          persona: 'findings-manager',
-          instruction: 'findings-manager',
-          outputContract: 'findings-manager',
-        },
-      },
-      steps: [
-        makeStep({
-          name: 'reviewers',
-          persona: 'reviewer',
-          instruction: 'Run reviewers.',
-          parallel: [
-            makeStep({
-              name: 'architecture-review',
-              persona: 'architecture-reviewer',
-              instruction: 'Review architecture.',
-              rules: [makeRule('when(true)', 'COMPLETE')],
-            }),
-          ],
-          rules: [
-            makeRule('when(findings.open.count == 1)', 'COMPLETE'),
-            makeRule('when(true)', 'ABORT'),
-          ],
-        }),
-      ],
-    };
-
-    const result = await new WorkflowEngine(config, cwd, 'task', {
-      projectCwd: cwd,
-      provider: 'claude',
-      reportDirName: 'test-report-dir',
-      detectRuleIndex: () => -1,
-    }).run();
-
-    // (1) provider が受け取った schema は strict: kind プロパティ無し・全 required。
-    expect(capturedOutputSchema).toBeDefined();
-    const items = (capturedOutputSchema as {
-      properties: { rawFindings: { items: { properties: Record<string, unknown>; required: string[] } } };
-    }).properties.rawFindings.items;
-    expect(Object.keys(items.properties)).not.toContain('kind');
-    expect(items.required).toEqual(Object.keys(items.properties));
-
-    // (2) kind 併記出力が post-hoc 検証（寛容版）を通過し、intake に到達して
-    //     台帳へ確定 finding として反映された（旧: schema validator が
-    //     $.rawFindings[0].kind で sub-step を殺し intake 不到達 → abort）。
-    expect(result.status).toBe('completed');
-    const ledger = JSON.parse(readFileSync(getAuthoritativeLedgerPath(cwd), 'utf-8')) as {
-      findings: Array<{ title: string; status: string }>;
-      rawFindings: Array<{ rawFindingId: string; kind?: string; relation?: string }>;
-    };
-    expect(ledger.findings).toContainEqual(expect.objectContaining({
-      title: 'Issue reported with legacy kind attached',
-      status: 'open',
-    }));
-    const wire = ledger.rawFindings.find((raw) => raw.rawFindingId.endsWith(':raw-1'));
-    expect(wire?.relation).toBe('new');
   });
 
   it('finding_contract の parallel reviewer は旧 findings キーを raw findings として扱わない', async () => {
@@ -4141,7 +4028,7 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (provisional fixpoint, batch B1)', (
     };
   }
 
-  it('stops at NEEDS_ADJUDICATION once a hallucinated provisional finding reaches a fixpoint across two review rounds, instead of replanning forever', async () => {
+  it('stops at NEEDS_ADJUDICATION once a repeated provisional exhausts interpretation recovery and reaches a fixpoint', async () => {
     vi.mocked(runAgent)
       // Round 1: reviewers report a structurally ambiguous re-report (persists
       // against a target the ledger has never seen). The one-shot relation
@@ -4163,19 +4050,45 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (provisional fixpoint, batch B1)', (
         options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
         return { persona: 'planner', status: 'done', content: 'Replanned.', timestamp: new Date() };
       })
-      // Round 2: reviewers report the exact same claim again (a different
-      // rawFindingId — identity survives, since the ladder's semantic key
-      // strips run-specific ids). The relation clarification is attempted
-      // again (it is per-response, not per-lineage), but codex B1's
-      // same-evidence-reappearance check reattaches this raw to the already
-      // ledger_applied provisional WITHOUT a second manager interpretation
-      // call — content (title/description/severity/familyTag/relation/target)
-      // is byte-identical to round 1, so the evidence hash matches.
+      // The repeated current observation must consume the second interpretation
+      // attempt before the unchanged unresolved state may form a fixpoint.
       .mockImplementationOnce(async (_persona, instruction, options) => {
         options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
         return ambiguousPersistsRawFindingResponse('raw-2', 'F-9001');
       })
-      .mockImplementationOnce(throwingClarificationResponse);
+      .mockImplementationOnce(throwingClarificationResponse)
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return interpretationRunAgentResponse(instruction);
+      })
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return { persona: 'planner', status: 'done', content: 'Replanned.', timestamp: new Date() };
+      })
+      // The third identical observation cannot spend another interpretation
+      // epoch, so the stable unresolved snapshot is now eligible to stop.
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return ambiguousPersistsRawFindingResponse('raw-3', 'F-9001');
+      })
+      .mockImplementationOnce(throwingClarificationResponse)
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return {
+          persona: 'findings-manager',
+          status: 'done',
+          content: '',
+          structuredOutput: {
+            rawDecisions: [],
+            disputeDecisions: [],
+            conflictDecisions: [],
+            invalidateDecisions: [],
+            duplicateDecisions: [],
+            dismissDecisions: [],
+          },
+          timestamp: new Date(),
+        };
+      });
 
     const engine = new WorkflowEngine(buildFixpointWorkflowConfig(), cwd, 'task', {
       projectCwd: cwd,
@@ -4198,10 +4111,7 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (provisional fixpoint, batch B1)', (
     expect(abortReasons[0]).toContain('raw-meaning-ambiguous');
     // Explains why it stopped (CLI-visible reason string).
     expect(abortReasons[0]).toContain('A human must adjudicate');
-    // reviewer1 + clarification1 + interpretation1 + planner + reviewer2 +
-    // clarification2 (round 2's interpretation call is skipped: same-evidence
-    // reappearance reattaches without re-invoking the manager).
-    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(11);
 
     // "Open provisional list + origin" is durably recorded (not only in the
     // ephemeral abort reason string) so a human/tool can inspect it later.
@@ -4483,6 +4393,7 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (bounded stop budget, codex-adjudica
   // first — even on a round where fixpoint ALSO holds (both true simultaneously).
   function buildBudgetBeforeFixpointWorkflowConfig(): WorkflowConfig {
     const config = buildBudgetWorkflowConfig();
+    config.findingContract!.stopBudget = { maxRounds: 3 };
     const reviewers = config.steps.find((step) => step.name === 'reviewers')!;
     // Reorder: budget rule first, fixpoint rule second (opposite of builtin).
     reviewers.rules = [
@@ -4496,10 +4407,8 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (bounded stop budget, codex-adjudica
   }
 
   it('records stopReason "budget-exhausted" (from the matched condition) when the budget rule is placed before the fixpoint rule and both hold — not the ledger-inferred fixpoint', async () => {
-    // The SAME hallucination repeats every round → fixpoint IS reached on round
-    // 2, AND the 2-round budget is exhausted on round 2. With the budget rule
-    // placed first, first-match-wins selects the budget rule; stopReason must
-    // reflect that fact, not the ledger's fixpoint.reached === true.
+    // Two interpretation attempts must finish before the repeated unresolved
+    // state is stable, so the budget is aligned to the third round.
     vi.mocked(runAgent)
       .mockImplementationOnce(async (_persona, instruction, options) => {
         options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
@@ -4514,16 +4423,41 @@ describe('WorkflowEngine NEEDS_ADJUDICATION (bounded stop budget, codex-adjudica
         options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
         return { persona: 'planner', status: 'done', content: 'Replanned.', timestamp: new Date() };
       })
-      // Round 2: the EXACT same claim (different rawFindingId, same identity —
-      // same targetFindingId/title/content, so the same evidence hash) →
-      // fixpoint reached AND budget exhausted at the same time. Round 2's
-      // interpretation call is skipped (same-evidence reappearance reattaches
-      // without re-invoking the manager — see the fixpoint describe block).
       .mockImplementationOnce(async (_persona, instruction, options) => {
         options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
         return churnRawFindingResponse('raw-2', 'F-9001', 'Repeated bug');
       })
-      .mockImplementationOnce(throwingClarificationResponse);
+      .mockImplementationOnce(throwingClarificationResponse)
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return interpretationRunAgentResponse(instruction);
+      })
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return { persona: 'planner', status: 'done', content: 'Replanned.', timestamp: new Date() };
+      })
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return churnRawFindingResponse('raw-3', 'F-9001', 'Repeated bug');
+      })
+      .mockImplementationOnce(throwingClarificationResponse)
+      .mockImplementationOnce(async (_persona, instruction, options) => {
+        options?.onPromptResolved?.({ systemPrompt: 'system', userInstruction: instruction });
+        return {
+          persona: 'findings-manager',
+          status: 'done',
+          content: '',
+          structuredOutput: {
+            rawDecisions: [],
+            disputeDecisions: [],
+            conflictDecisions: [],
+            invalidateDecisions: [],
+            duplicateDecisions: [],
+            dismissDecisions: [],
+          },
+          timestamp: new Date(),
+        };
+      });
 
     const engine = new WorkflowEngine(buildBudgetBeforeFixpointWorkflowConfig(), cwd, 'task', {
       projectCwd: cwd,

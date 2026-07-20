@@ -8,12 +8,13 @@
 {{else}}現在の台帳サマリ:
 {{/if}}{{ledgerSummary}}
 
-{{#if isReviewer}}- 観測した新規の問題はすべて、relation を "new"（targetFindingId は空）にした構造化 raw finding として報告してください。relation が正本のフィールドです。legacy の kind フィールドは出力しないでください。
+{{#if isReviewer}}- 観測した新規の問題はすべて、relation を "new"（targetFindingId は空）にした構造化 raw finding として報告してください。
 - `new` / `persists` / `resolution_confirmation` / `reopened` は、証跡と必要な ledger ID を添える raw relation です。最終 lifecycle 判定と finding ID の対応づけは findings-manager とエンジンが行うため、レビュワーは最終状態を採番・判定しないでください。
 {{/if}}{{#if reviewerHasOpenFindings}}- 毎ラウンド、自分のレビュー範囲に入る open な台帳の指摘を検証してください。
 - open な指摘が修正済みだと確認できたら、relation を "resolution_confirmation"、targetFindingId に台帳の finding ID、description に file:line の証跡を書いた raw finding として報告してください。指摘が resolved になる経路はこの確認だけです。
 - 同じ場所で未修正のまま残っている open な指摘を再報告しないでください。まだ発生しているがそれを明示的に確認したい場合（例: 別の行に移動した、沈黙せず「まだ残っている」ことを記録したい）は、relation を "persists"、targetFindingId にその台帳 finding ID を設定して報告してください — 元の報告との familyTag や行番号の違いは問題になりません。finding ID を明示してください。実際に別問題へ退行した場合にだけ、新しい "new" の issue として報告してください。
 {{/if}}{{#if reviewerHasWaivedFindings}}- 台帳サマリで waived になっている指摘を再報告しないでください。waive の前提が崩れていると観測した場合は、relation を "reopened"、targetFindingId にその waived finding ID を設定して報告してください。
+{{/if}}{{#if reviewerHasDismissedFindings}}- 台帳サマリで dismissed になっている指摘を new として再報告しないでください。dismiss の前提が成立しなくなったと観測した場合は、relation を "reopened"、targetFindingId にその dismissed finding ID を設定して報告してください。
 {{/if}}{{#if isReviewer}}- rawFindingId はこの応答の中で一意にしてください。
 - 「観測した指摘」の family_tag の値を、構造化された familyTag フィールドへそのまま写してください。分類・検索のヒントに過ぎず、既存 finding と同一かどうかの判断には使われません。
 - すべての finding に evidenceKind が必要です。`location` に実在するコードを引用する場合は "source_quote" にしてください。verbatimExcerpt には、その行の内容を一字一句そのまま — 記憶からの再入力・言い換え・翻訳をせず、読んだファイルからそのままコピーしてください。エンジンは verbatimExcerpt を現在のファイル内容とバイト単位で照合します。一致しない引用は確定した欠陥として扱われません（ブロックする指摘にはならず、レビューのため隔離されます）。source_quote の finding には、次の値をそのまま snapshotId にコピーしてください: {{reviewScopeSnapshotId}}

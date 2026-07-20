@@ -23,9 +23,9 @@ export const RAW_FINDINGS_SCHEMA_REF = 'takt.findings.raw.v1';
 export { FINDING_MANAGER_SCHEMA_REF } from './manager-step.js';
 export const RawFindingsStructuredOutput = {
   schemaRef: RAW_FINDINGS_SCHEMA_REF,
-  /** provider-facing（strict 様式・kind 無し）。native structured output の生成拘束用。 */
+  /** provider-facing strict schema。native structured output の生成拘束用。 */
   schema: RawFindingsOutputJsonSchema,
-  /** post-hoc 検証用の寛容版（legacy kind を optional で受理）。provider へは渡さない。 */
+  /** post-hoc 検証用 schema。provider へは渡さない。 */
   validationSchema: RawFindingsOutputValidationJsonSchema,
 } as const;
 
@@ -258,10 +258,24 @@ export async function runManagerAttempt(input: {
   stepExecutor: Pick<StepExecutor, 'buildPhase1Instruction' | 'normalizeStructuredOutput' | 'recordSynthesizedAgentUsage'>;
 }): Promise<AgentResponse> {
   const phase1Instruction = input.stepExecutor.buildPhase1Instruction(input.instruction, input.managerStep);
+  return runPreparedManagerAttempt({
+    managerStep: input.managerStep,
+    phase1Instruction,
+    optionsBuilder: input.optionsBuilder,
+    stepExecutor: input.stepExecutor,
+  });
+}
+
+export async function runPreparedManagerAttempt(input: {
+  managerStep: AgentWorkflowStep;
+  phase1Instruction: string;
+  optionsBuilder: OptionsBuilder;
+  stepExecutor: Pick<StepExecutor, 'normalizeStructuredOutput' | 'recordSynthesizedAgentUsage'>;
+}): Promise<AgentResponse> {
   const agentOptions = buildManagerAgentOptions(input.optionsBuilder, input.managerStep);
   let rawResponse: AgentResponse;
   try {
-    rawResponse = await executeAgent(input.managerStep.persona, phase1Instruction, agentOptions);
+    rawResponse = await executeAgent(input.managerStep.persona, input.phase1Instruction, agentOptions);
   } catch (error) {
     // 呼び出し自体が失敗しても集計の死角を作らない — usage 欠損の失敗イベントを残す。
     input.stepExecutor.recordSynthesizedAgentUsage(input.managerStep, false, undefined);

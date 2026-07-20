@@ -1,6 +1,5 @@
 import { canonicalizeFindingManagerOutput } from './canonicalize.js';
 import { normalizeFindingText, parseFindingLocation } from './location.js';
-import { deriveRawFindingRelation } from './schemas.js';
 import { createEmptyManagerOutput } from './manager-output.js';
 import type { FindingLedger, FindingManagerOutput, RawFinding } from './types.js';
 
@@ -31,14 +30,10 @@ export interface MechanicalClassificationResult {
 }
 
 /**
- * raw finding の実効 relation。schema（parseReviewerRawFindings /
- * parseRawFindings）を通った raw は常に relation を持つが、テストや古い経路の
- * 手組み raw に備えて finding-schemas.ts の deriveRawFindingRelation（導出の
- * 正本）へ委譲するフォールバックを持つ。decision-assembly.ts（'new' 判断の
- * 明示参照検査）と manager-runner.ts（強制 new 化の除外）も同じ導出を共有する。
+ * raw finding の relation を返す。現行契約では必須フィールドである。
  */
-export function effectiveRawFindingRelation(raw: Pick<RawFinding, 'kind' | 'relation' | 'targetFindingId'>): NonNullable<RawFinding['relation']> {
-  return deriveRawFindingRelation(raw.kind, raw.relation, raw.targetFindingId);
+export function effectiveRawFindingRelation(raw: Pick<RawFinding, 'relation'>): RawFinding['relation'] {
+  return raw.relation;
 }
 
 /** Exact-duplicate identity key for case 1: normalized (path, title, description, suggestion). Line number is deliberately excluded (evidence of current position, not identity). */
@@ -52,11 +47,14 @@ function exactDuplicateKey(raw: Pick<RawFinding, 'title' | 'description' | 'sugg
 }
 
 /** Indexes every raw finding attached to an open ledger finding by its exact-duplicate key, for case-1 matching. */
-function buildExactDuplicateIndex(ledger: FindingLedger): Map<string, string> {
+function buildExactDuplicateIndex(
+  ledger: FindingLedger,
+  excludedFindingIds: ReadonlySet<string>,
+): Map<string, string> {
   const rawById = new Map(ledger.rawFindings.map((raw) => [raw.rawFindingId, raw]));
   const index = new Map<string, string>();
   for (const finding of ledger.findings) {
-    if (finding.status !== 'open') {
+    if (finding.status !== 'open' || excludedFindingIds.has(finding.id)) {
       continue;
     }
     for (const rawFindingId of finding.rawFindingIds) {
@@ -78,11 +76,17 @@ function buildExactDuplicateIndex(ledger: FindingLedger): Map<string, string> {
 export function classifyRawFindingsMechanically(input: {
   previousLedger: FindingLedger;
   rawFindings: RawFinding[];
+  excludedFindingIdsFromExactDuplicateIndex?: ReadonlySet<string>;
 }): MechanicalClassificationResult {
   const output = createEmptyManagerOutput();
   const residualRawFindings: RawFinding[] = [];
   const findingsById = new Map(input.previousLedger.findings.map((finding) => [finding.id, finding]));
-  const exactDuplicateIndex = buildExactDuplicateIndex(input.previousLedger);
+  const exactDuplicateIndex = buildExactDuplicateIndex(
+    input.previousLedger,
+    input.excludedFindingIdsFromExactDuplicateIndex === undefined
+      ? new Set()
+      : input.excludedFindingIdsFromExactDuplicateIndex,
+  );
 
   const resolvedByFindingId = new Map<string, { findingId: string; rawFindingIds: string[]; evidence: string }>();
   const matchesByFindingId = new Map<string, { findingId: string; rawFindingIds: string[] }>();

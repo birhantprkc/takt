@@ -6,6 +6,7 @@ import type { AgentResponse, WorkflowStep } from '../core/models/types.js';
 import type { FindingLedger, FindingLedgerStore, RawFinding } from '../core/workflow/findings/types.js';
 import { runFindingManagerForStep } from '../core/workflow/findings/manager-runner.js';
 import { createFindingLedgerStore, type FindingManagerValidationReport } from '../core/workflow/findings/store.js';
+import { createFindingAdjudicationReservation } from './helpers/finding-adjudication-reservation.js';
 import { verifiedSourceQuoteFields } from './helpers/finding-evidence.js';
 import { initializeGitFixture } from './helpers/git-fixture.js';
 
@@ -100,6 +101,7 @@ function makeHarness(initialLedger: FindingLedger): Harness {
       savedLedgers.push(ledger);
       return Promise.resolve(mutation);
     },
+    ...createFindingAdjudicationReservation(),
     createRunCopy: () => '/tmp/ledger-copy.json',
     saveRawFindings: (_runId, _stepName, rawFindings) => {
       savedRawFindings.push(rawFindings);
@@ -169,7 +171,6 @@ const CONFIRMATION_RAW = {
   title: 'Confirmed fixed',
   description: 'Verified the fix at src/a.ts:10.',
   suggestion: '',
-  kind: 'resolution_confirmation',
   relation: 'resolution_confirmation',
   targetFindingId: 'F-0001',
   ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/a.ts', 10),
@@ -182,7 +183,6 @@ const UNMATCHED_ISSUE_RAW = {
   title: 'New unmatched issue',
   description: 'A different problem.',
   suggestion: 'Fix it.',
-  kind: 'issue',
   relation: 'new',
   targetFindingId: '',
   ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/b.ts', 5),
@@ -195,7 +195,6 @@ const ANOTHER_UNMATCHED_ISSUE_RAW = {
   title: 'Another unmatched issue',
   description: 'A separate different problem.',
   suggestion: 'Fix it too.',
-  kind: 'issue',
   relation: 'new',
   targetFindingId: '',
   ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/c.ts', 1),
@@ -306,7 +305,7 @@ describe('runFindingManagerForStep rejected decisions land as provisional (no re
     expect(accepted?.provisional).toBeUndefined();
     const rejected = ledger?.findings.find((entry) => entry.title === 'Another unmatched issue');
     expect(rejected?.status).toBe('open');
-    expect(rejected?.provisional).toMatchObject({ kind: 'raw-meaning-ambiguous', gateEffect: 'block' });
+    expect(rejected?.provisional).toMatchObject({ kind: 'raw-adjudication-unresolved', gateEffect: 'block' });
     expect(harness.savedValidationReports).toHaveLength(1);
     expect(harness.savedValidationReports[0]?.ledgerUpdated).toBe(true);
     expect(harness.savedValidationReports[0]?.provisionalLandings?.some(
@@ -357,7 +356,7 @@ describe('runFindingManagerForStep rejected decisions land as provisional (no re
     const ledger = harness.savedLedgers.at(-1);
     const landed = ledger?.findings.find((entry) => entry.title === 'New unmatched issue');
     expect(landed?.status).toBe('open');
-    expect(landed?.provisional).toMatchObject({ kind: 'raw-meaning-ambiguous' });
+    expect(landed?.provisional).toMatchObject({ kind: 'raw-adjudication-unresolved' });
     expect(harness.savedValidationReports).toHaveLength(1);
     expect(harness.savedValidationReports[0]?.ledgerUpdated).toBe(true);
   });
@@ -506,6 +505,7 @@ describe('runFindingManagerForStep workflow_call sub-steps', () => {
         savedLedgers.push(mutation.ledger);
         return Promise.resolve(mutation);
       },
+      ...createFindingAdjudicationReservation(),
       createRunCopy: () => '/tmp/ledger-copy.json',
       saveRawFindings: (_runId, _stepName, rawFindings) => {
         savedRawFindings.push(rawFindings);
@@ -707,7 +707,6 @@ describe('runFindingManagerForStep concurrent workflow_call lost update', () => 
         title: 'Issue reported by child A',
         description: 'Reported by concurrent child A.',
         suggestion: '',
-        kind: 'issue',
         relation: 'new',
         ...verifiedSourceQuoteFields(projectCwd, 'src/a.ts', 10),
       }),
@@ -718,7 +717,6 @@ describe('runFindingManagerForStep concurrent workflow_call lost update', () => 
         title: 'Issue reported by child B',
         description: 'Reported by concurrent child B.',
         suggestion: '',
-        kind: 'issue',
         relation: 'new',
         ...verifiedSourceQuoteFields(projectCwd, 'src/b.ts', 20),
       }),
@@ -841,7 +839,6 @@ describe('runFindingManagerForStep concurrent workflow_call lost update', () => 
         title: 'Duplicate issue at src/dup.ts',
         description: 'The handle opened at src/dup.ts:10 is never released.',
         suggestion: '',
-        kind: 'issue',
         relation: 'new',
         ...verifiedSourceQuoteFields(projectCwd, 'src/dup.ts', 10),
       }),
@@ -855,7 +852,6 @@ describe('runFindingManagerForStep concurrent workflow_call lost update', () => 
         title: 'Duplicate issue at src/dup.ts',
         description: 'The handle opened at src/dup.ts:10 is never released.',
         suggestion: '',
-        kind: 'issue',
         relation: 'new',
         ...verifiedSourceQuoteFields(projectCwd, 'src/dup.ts', 10),
       }),
@@ -926,6 +922,7 @@ describe('runFindingManagerForStep stale rejection excluded from unmentioned fal
         savedLedgers.push(mutation.ledger);
         return Promise.resolve(mutation);
       },
+      ...createFindingAdjudicationReservation(),
       createRunCopy: () => '/tmp/ledger-copy.json',
       saveRawFindings: () => '/tmp/raw-findings.json',
       saveManagerValidationReport: (report) => {
@@ -962,7 +959,6 @@ describe('runFindingManagerForStep stale rejection excluded from unmentioned fal
       title: 'Restated existing issue',
       description: 'Same bug, reported again at a nearby line.',
       suggestion: '',
-      kind: 'issue',
       relation: 'new',
       ...verifiedSourceQuoteFields(FIXTURE_CWD, 'src/a.ts', 11),
     };
@@ -1000,7 +996,7 @@ describe('runFindingManagerForStep stale rejection excluded from unmentioned fal
     expect(savedLedger?.findings.find((f) => f.id === 'F-0001')?.status).toBe('resolved');
     const landed = savedLedger?.findings.find((f) => f.title === 'Restated existing issue');
     expect(landed?.status).toBe('open');
-    expect(landed?.provisional).toMatchObject({ kind: 'raw-meaning-ambiguous', gateEffect: 'block' });
+    expect(landed?.provisional).toMatchObject({ kind: 'raw-adjudication-unresolved', gateEffect: 'block' });
     // 除外した理由は validation report に残る。
     expect(savedValidationReports).toHaveLength(1);
     expect(savedValidationReports[0]?.ledgerUpdated).toBe(true);

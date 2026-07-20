@@ -13,6 +13,7 @@ function makeContract(overrides: Partial<FindingContractInstructionContext> = {}
     ledgerSummary: { findings: [] },
     hasOpenFindings: false,
     hasWaivedFindings: false,
+    hasDismissedFindings: false,
     ...overrides,
   };
 }
@@ -47,6 +48,7 @@ describe('buildFindingContractInstruction', () => {
           reviewScopeSnapshotId: REVIEWER_SNAPSHOT_ID,
           hasOpenFindings: true,
           hasWaivedFindings: true,
+          hasDismissedFindings: true,
         },
       ]) {
         const rendered = build({ contract, language });
@@ -73,27 +75,6 @@ describe('buildFindingContractInstruction', () => {
       expect(rendered).not.toContain('Disputed Findings');
     });
 
-    // v2 梯子設計 §2.2: 新規 reviewer contract では relation が正本で、legacy の
-    // kind は出力させない。両言語でその旨を明示する。
-    it('tells reviewers that relation is authoritative and kind must not be emitted, in both languages', () => {
-      const en = build({
-        contract: { rawFindingsJsonSchema: REVIEWER_SCHEMA, reviewScopeSnapshotId: REVIEWER_SNAPSHOT_ID },
-        language: 'en',
-      });
-      expect(en).toContain('`relation` is the authoritative field');
-      expect(en).toContain('do not emit the legacy `kind` field');
-
-      const ja = build({
-        contract: { rawFindingsJsonSchema: REVIEWER_SCHEMA, reviewScopeSnapshotId: REVIEWER_SNAPSHOT_ID },
-        language: 'ja',
-      });
-      expect(ja).toContain('relation が正本のフィールドです');
-      expect(ja).toContain('legacy の kind フィールドは出力しないでください');
-
-      // レビュアー以外（isReviewer=false）には出ない。
-      expect(build({ contract: { hasOpenFindings: true } })).not.toContain('authoritative field');
-    });
-
     // provisional は fixer が直接直せない system finding であることを明示する
     // （v2 梯子設計 実装単位9）。
     it('explains provisional findings as unfixable system findings in both languages', () => {
@@ -106,7 +87,7 @@ describe('buildFindingContractInstruction', () => {
       expect(ja).toContain('system finding');
     });
 
-    // rawFindingId / familyTag / kind / targetFindingId は manager-runner /
+    // rawFindingId / familyTag / relation / targetFindingId は manager-runner /
     // manager-output-validation が英語リテラルで照合する raw finding のフィールド名。
     // ja テンプレートでも英語のまま出ることを確認する。
     it('keeps raw finding protocol field names in English for ja', () => {
@@ -121,8 +102,31 @@ describe('buildFindingContractInstruction', () => {
       });
       expect(rendered).toContain('rawFindingId');
       expect(rendered).toContain('familyTag');
-      expect(rendered).toContain('kind');
+      expect(rendered).toContain('relation');
       expect(rendered).toContain('targetFindingId');
+    });
+
+    it('instructs reviewers to reopen dismissed findings in both languages', () => {
+      const en = build({
+        contract: {
+          rawFindingsJsonSchema: REVIEWER_SCHEMA,
+          reviewScopeSnapshotId: REVIEWER_SNAPSHOT_ID,
+          hasDismissedFindings: true,
+        },
+      });
+      const ja = build({
+        contract: {
+          rawFindingsJsonSchema: REVIEWER_SCHEMA,
+          reviewScopeSnapshotId: REVIEWER_SNAPSHOT_ID,
+          hasDismissedFindings: true,
+        },
+        language: 'ja',
+      });
+
+      expect(en).toContain('listed as dismissed');
+      expect(en).toContain('relation "reopened"');
+      expect(ja).toContain('dismissed になっている指摘');
+      expect(ja).toContain('relation を "reopened"');
     });
   });
 

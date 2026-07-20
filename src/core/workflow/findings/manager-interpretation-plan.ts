@@ -1,12 +1,13 @@
-import type { ProvisionalFindingSpec } from './reconciler.js';
 import {
-  computeInterpretationKey,
-  computeProvisionalStableKey,
+  computeRawEvidenceHash,
   detectRawFindingAmbiguities,
 } from './raw-canonicalization.js';
 import { MANAGER_INTERPRETATION_LIMITS } from './raw-finding-limits.js';
 import { issueDeterministicSameProofs } from './raw-capabilities.js';
-import { countInterpretationEpochs } from './interpretation-wal.js';
+import {
+  countInterpretationEpochs,
+  resolveInterpretationAttempt,
+} from './interpretation-wal.js';
 import type {
   AmbiguousInterpretation,
   DeterministicSameProof,
@@ -19,12 +20,15 @@ import type { beginInterpretations } from './interpretation-wal.js';
 
 export function emptyLadderResult(ambiguousRawCount: number): LadderResult {
   return {
+    interpretationReservations: new Map(),
+    deferredRawFindingIds: new Set(),
     pendingSameWithProof: [],
     pendingIndependentNew: [],
     pendingConflicts: [],
     provisionalSpecs: [],
     provisionalByInterpretationKey: new Map(),
     pendingAppliedReattach: [],
+    recoveryProvisionalInterpretationKeys: new Set(),
     stats: {
       ambiguousRawCount,
       managerCalls: 0,
@@ -56,16 +60,32 @@ export function classifyInitialLadderTargets(input: {
     [...issuedProofs].filter(([rawFindingId]) => !input.provisionalOnlyRawFindingIds.has(rawFindingId)),
   );
   const classified = input.tainted.reduce<Omit<InitialLadderPlan, 'proofsByRawId'>>((plan, item) => {
+    const recoveryEvidenceIsRecorded = item.recoveryOrigin !== undefined
+      && input.previousLedger.findings.some((finding) => (
+        finding.id === item.recoveryOrigin?.provisionalFindingId
+        && finding.provisional?.sourceRawFindingIds.some((rawFindingId) => (
+          input.previousLedger.rawFindings.some((raw) => (
+            raw.rawFindingId === rawFindingId
+            && computeRawEvidenceHash(raw) === item.canonical.evidenceHash
+          ))
+        )) === true
+      ));
+    const attempt = resolveInterpretationAttempt({
+      ledger: input.previousLedger,
+      reviewerStableKey: item.canonical.reviewerStableKey,
+      lineageKey: item.canonical.lineageKey,
+      candidateEvidenceHash: item.canonical.evidenceHash,
+    });
     const target: LadderTarget = {
       canonical: item.canonical,
       wire: item.wire,
-      interpretationKey: computeInterpretationKey({
-        reviewerStableKey: item.canonical.reviewerStableKey,
-        lineageKey: item.canonical.lineageKey,
-        candidateEvidenceHash: item.canonical.evidenceHash,
-      }),
+      ...attempt,
+      ...(item.interpretationRecoveryAttempt === true ? { interpretationRecoveryAttempt: true } : {}),
+      ...(item.recoveryOrigin !== undefined ? { recoveryOrigin: item.recoveryOrigin } : {}),
     };
-    const proof = proofsByRawId.get(item.canonical.rawFindingId);
+    const proof = item.recoveryOrigin === undefined || recoveryEvidenceIsRecorded
+      ? proofsByRawId.get(item.canonical.rawFindingId)
+      : undefined;
     if (proof !== undefined) {
       return {
         ...plan,
@@ -82,7 +102,10 @@ export function classifyInitialLadderTargets(input: {
           ...plan,
           result: {
             ...plan.result,
-            pendingIndependentNew: [...plan.result.pendingIndependentNew, { wire: item.wire }],
+            pendingIndependentNew: [...plan.result.pendingIndependentNew, {
+              wire: item.wire,
+              ...(target.recoveryOrigin !== undefined ? { recoveryOrigin: target.recoveryOrigin } : {}),
+            }],
           },
         };
       }
@@ -123,15 +146,30 @@ export function classifyInterpretationWal(input: {
 }): WalLadderPlan {
   return input.targets.reduce<WalLadderPlan>((plan, target) => {
     const key = target.interpretationKey;
+    if (input.begin.deferredKeys.has(key)) {
+      return {
+        ...plan,
+        result: {
+          ...plan.result,
+          deferredRawFindingIds: new Set([
+            ...plan.result.deferredRawFindingIds,
+            target.wire.rawFindingId,
+          ]),
+        },
+      };
+    }
     if (input.begin.appliedByKey.has(key)) {
       const priorResult = input.begin.appliedByKey.get(key);
-      if ((priorResult === 'created' || priorResult === 'matched_with_proof')
+      if ((priorResult === 'created' || priorResult === 'matched_with_proof' || priorResult === 'conflict_created')
         && !input.provisionalOnlyRawFindingIds.has(target.canonical.rawFindingId)) {
         return {
           ...plan,
           result: {
             ...plan.result,
-            pendingAppliedReattach: [...plan.result.pendingAppliedReattach, { target }],
+            pendingAppliedReattach: [
+              ...plan.result.pendingAppliedReattach,
+              { target, applicationResult: priorResult },
+            ],
           },
         };
       }
@@ -161,38 +199,19 @@ export function classifyInterpretationWal(input: {
         decidedByKey: new Map([...plan.decidedByKey, [key, completed]]),
       };
     }
-    if (!input.begin.interruptedKeys.has(key)) {
-      return { ...plan, toCall: [...plan.toCall, target] };
-    }
-    const spec: ProvisionalFindingSpec = {
-      ...provisionalSpecForRaw({
-        wire: target.wire,
-        canonical: target.canonical,
-        reason: 'Interpretation was interrupted before the manager decision was recorded; kept provisional without re-interpreting',
-      }),
-      kind: 'interpretation-interrupted',
-      stableKey: computeProvisionalStableKey({
-        reviewerStableKey: target.canonical.reviewerStableKey,
-        lineageKey: target.canonical.lineageKey,
-        provisionalKind: 'interpretation-interrupted',
-      }),
-    };
-    return {
-      ...plan,
-      result: {
-        ...plan.result,
-        provisionalSpecs: [...plan.result.provisionalSpecs, spec],
-        provisionalByInterpretationKey: new Map([
-          ...plan.result.provisionalByInterpretationKey,
-          [key, spec],
-        ]),
-        stats: {
-          ...plan.result.stats,
-          interruptedInterpretations: plan.result.stats.interruptedInterpretations + 1,
-        },
+    return { ...plan, toCall: [...plan.toCall, target] };
+  }, {
+    result: {
+      ...input.result,
+      stats: {
+        ...input.result.stats,
+        interruptedInterpretations: input.result.stats.interruptedInterpretations
+          + input.begin.interruptedPriorKeys.size,
       },
-    };
-  }, { result: input.result, decidedByKey: new Map(), toCall: [] });
+    },
+    decidedByKey: new Map(),
+    toCall: [],
+  });
 }
 
 export function applyInterpretationDecisions(input: {
@@ -219,7 +238,11 @@ export function applyInterpretationDecisions(input: {
     if (decision.decision === 'create_independent') {
       return {
         ...result,
-        pendingIndependentNew: [...result.pendingIndependentNew, { wire: target.wire, viaInterpretationKey: key }],
+        pendingIndependentNew: [...result.pendingIndependentNew, {
+          wire: target.wire,
+          viaInterpretationKey: key,
+          ...(target.recoveryOrigin !== undefined ? { recoveryOrigin: target.recoveryOrigin } : {}),
+        }],
       };
     }
     if (decision.decision === 'open_conflict') {
@@ -250,8 +273,16 @@ export function applyInterpretationDecisions(input: {
     });
     return {
       ...result,
-      provisionalSpecs: [...result.provisionalSpecs, spec],
+      provisionalSpecs: target.interpretationRecoveryAttempt === true
+        ? result.provisionalSpecs
+        : [...result.provisionalSpecs, spec],
       provisionalByInterpretationKey: new Map([...result.provisionalByInterpretationKey, [key, spec]]),
+      recoveryProvisionalInterpretationKeys: target.interpretationRecoveryAttempt === true
+        ? new Set([
+            ...result.recoveryProvisionalInterpretationKeys,
+            key,
+          ])
+        : result.recoveryProvisionalInterpretationKeys,
     };
   }, input.result);
 }
