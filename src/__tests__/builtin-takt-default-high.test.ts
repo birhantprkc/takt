@@ -12,6 +12,7 @@ type WorkflowStep = {
   name?: string;
   kind?: string;
   call?: string;
+  args?: Record<string, unknown>;
   tags?: string[];
   edit?: boolean;
   instruction?: unknown;
@@ -31,7 +32,7 @@ type WorkflowStep = {
   provider?: unknown;
   model?: unknown;
   parallel?: WorkflowStep[];
-  rules?: Array<{ next?: string; condition?: string }>;
+  rules?: Array<{ next?: string; return?: string; condition?: string }>;
 };
 
 type Workflow = {
@@ -59,7 +60,7 @@ const localWorkflows = [
   'dual-for-local-llm',
   'peer-review-for-local-llm',
 ] as const;
-const builtinWorkflowFilesPerLocale = 59;
+const builtinWorkflowFilesPerLocale = 61;
 
 const genericInstructionNames = [
   'review-arch',
@@ -85,7 +86,7 @@ const approvedContentHashes: Record<typeof locales[number], {
       'robustness-review': '45e5af49cdfa3f972d1a9b8e237786d5c0267132fde9c67c857a48f58469cced',
     },
     genericArchitecturePersona: '4f1a7eb34727fc16d67e09198872869321bd21f9bfc7856f6b6cbe306fe0dfde',
-    taktDefaultWorkflow: '1e46c28da3430a79f12fb909cc145282baad3243374ba78d6690deeca8874dc2',
+    taktDefaultWorkflow: '72eec088939c61e9bb4dae5045375bad2a6accd9d6e9cc29052d23f584bb2d05',
   },
   en: {
     genericInstructions: {
@@ -97,7 +98,7 @@ const approvedContentHashes: Record<typeof locales[number], {
       'robustness-review': 'be6ddf378b4af0bf3f8945790f68b32f31bb59b908f738381847f82083ba62ee',
     },
     genericArchitecturePersona: 'f5890219e61509a0c3e19efd2235bd020c212eea8d630b5ce5d5a007d455c41d',
-    taktDefaultWorkflow: '852d33b8e27afb509460fdf2d33d24a536e752145168c4485903f5bf90312116',
+    taktDefaultWorkflow: '4025df44c4f4eed0a6f6a33d481b18b60f19334165081a7855d95460ac18fcad',
   },
 };
 
@@ -271,6 +272,12 @@ describe('takt-default-high builtin workflow', () => {
       const fix = stepByName(steps, 'fix');
       const reviewers = stepByName(steps, 'reviewers');
       const finalGate = stepByName(steps, 'final-gate');
+      const finalGateWorkflow = readYaml<Workflow>(
+        locale,
+        join('workflows', 'merge-readiness-finding-contract-final-gate.yaml'),
+      );
+      const mergeReadiness = stepByName(finalGateWorkflow.steps ?? [], 'merge-readiness-review');
+      const supervise = stepByName(finalGateWorkflow.steps ?? [], 'supervise');
 
       expect(workflow).toMatchObject({
         name: 'takt-default-high',
@@ -304,8 +311,16 @@ describe('takt-default-high builtin workflow', () => {
         'robustness-review',
       ]);
       expect(reviewers.parallel?.some((step) => isLocalFacetReference(step.persona))).toBe(false);
-      expect(finalGate.parallel?.map((step) => step.name)).toEqual(['merge-readiness-review', 'supervise']);
-      expect(finalGate.parallel?.find((step) => step.name === 'supervise')?.instruction).toBe('supervise-finding-contract');
+      expect(finalGate).toMatchObject({
+        kind: 'workflow_call',
+        call: 'merge-readiness-finding-contract-final-gate',
+        args: { supervise_knowledge: ['architecture', 'takt'] },
+      });
+      expect(mergeReadiness.parallel).toBeUndefined();
+      expect(mergeReadiness.rules?.find((rule) => rule.condition?.startsWith('approved'))?.next).toBe('supervise');
+      expect(mergeReadiness.rules?.find((rule) => rule.condition?.startsWith('needs_fix'))?.return).toBe('needs_fix');
+      expect(supervise.instruction).toBe('supervise-finding-contract');
+      expect(supervise.rules?.find((rule) => rule.condition?.startsWith('approved'))?.next).toBe('COMPLETE');
       expect(hasFixedProviderOrModelOnStep(steps)).toBe(false);
 
       expect(workflow.loop_monitors?.map((monitor) => monitor.cycle)).toEqual([
@@ -317,8 +332,9 @@ describe('takt-default-high builtin workflow', () => {
         'final-gate', 'final-gate', 'NEEDS_ADJUDICATION', 'NEEDS_ADJUDICATION',
         'plan', 'fix', 'fix', 'finding-conflict-adjudication', 'ABORT',
       ]);
-      expect(finalGate.rules?.map((rule) => rule.next)).toContain('COMPLETE');
-      expect(finalGate.rules?.map((rule) => rule.next)).toContain('NEEDS_ADJUDICATION');
+      expect(mergeReadiness.rules?.map((rule) => rule.next)).toContain('NEEDS_ADJUDICATION');
+      expect(supervise.rules?.map((rule) => rule.next)).toContain('COMPLETE');
+      expect(supervise.rules?.map((rule) => rule.next)).toContain('NEEDS_ADJUDICATION');
     });
 
     it(`${locale} uses Team Leaders only for implementation and fixes in takt-default-team-high`, () => {
@@ -555,7 +571,10 @@ describe('takt-default-high builtin workflow', () => {
           const workflowPath = join(process.cwd(), 'builtins', locale, 'workflows', `${name}.yaml`);
           const workflow = loadWorkflowFromFile(workflowPath, projectDir);
           expect(workflow).toMatchObject({ name, initialStep: 'plan', maxSteps: 200 });
-          expect(() => validateWorkflowConfig(workflow, { projectCwd: projectDir })).not.toThrow();
+          expect(() => validateWorkflowConfig(workflow, {
+            projectCwd: projectDir,
+            workflowCallResolver: () => null,
+          })).not.toThrow();
           expect(inspectWorkflowFile(workflowPath, projectDir).diagnostics).toEqual([]);
         }
       } finally {

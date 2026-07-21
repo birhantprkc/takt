@@ -326,7 +326,7 @@ export class WorkflowEngine extends EventEmitter {
             this.sharedRuntime.maxSteps = maxSteps;
           },
           checkCompletionGate: this.checkCompletionGate.bind(this),
-          checkReviewIntegrityGate: this.checkReviewIntegrityGate.bind(this),
+          checkReturnValueGate: this.checkReturnValueGate.bind(this),
           recordNeedsAdjudication: this.recordNeedsAdjudication.bind(this),
         }),
         (result) => ({
@@ -458,6 +458,13 @@ export class WorkflowEngine extends EventEmitter {
       return { ok: true };
     }
     return { ok: false, reason: ['Cannot complete:', ...this.formatReviewIntegrityGateReason(anomalies)].join('\n') };
+  }
+
+  private checkReturnValueGate(): { ok: true } | { ok: false; reason: string } {
+    if (this.options.inheritedFindingContract !== undefined) {
+      return { ok: true };
+    }
+    return this.checkReviewIntegrityGate();
   }
 
   /**
@@ -895,7 +902,7 @@ export class WorkflowEngine extends EventEmitter {
           emit: (event, ...args) => this.emit(event as never, ...args as []),
           updateMaxSteps: () => {},
           checkCompletionGate: this.checkCompletionGate.bind(this),
-          checkReviewIntegrityGate: this.checkReviewIntegrityGate.bind(this),
+          checkReturnValueGate: this.checkReturnValueGate.bind(this),
           recordNeedsAdjudication: this.recordNeedsAdjudication.bind(this),
         }),
         (result) => ({

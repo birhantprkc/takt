@@ -17,7 +17,7 @@ interface WorkflowStepRaw {
   provider?: string;
   model?: string;
   policy?: string | string[];
-  knowledge?: string[];
+  knowledge?: string[] | { $param: string };
   pass_previous_response?: boolean;
   call?: string;
   args?: Record<string, unknown>;
@@ -31,6 +31,9 @@ interface WorkflowStepRaw {
 
 interface BuiltinWorkflowRaw {
   finding_contract?: unknown;
+  subworkflow?: {
+    requires_finding_contract?: boolean;
+  };
   loop_monitors?: Array<{
     cycle?: string[];
     threshold?: number;
@@ -161,7 +164,10 @@ function markdownContractLineCount(content: string): number {
 }
 
 function ruleSignatures(step: WorkflowStepRaw): Array<{ condition: string | undefined; next: string | undefined }> {
-  return (step.rules ?? []).map(({ condition, next }) => ({ condition, next }));
+  return (step.rules ?? []).map(({ condition, next, return: returnValue }) => ({
+    condition,
+    next: next ?? returnValue,
+  }));
 }
 
 type Locale = 'en' | 'ja';
@@ -188,7 +194,7 @@ interface ReviewStepExpectation {
   name: string;
   persona: string | undefined;
   policy: string | string[] | undefined;
-  knowledge: string[] | undefined;
+  knowledge: string[] | { $param: string } | undefined;
   instruction: string | undefined;
   session: string | undefined;
   session_key: string | undefined;
@@ -208,9 +214,9 @@ function reviewRuleCategory(rule: NonNullable<WorkflowStepRaw['rules']>[number],
   const aiNoIssues = locale === 'ja' ? 'AI特有の問題なし' : 'No AI-specific issues';
   const aiIssues = locale === 'ja' ? 'AI特有の問題あり' : 'AI-specific issues found';
 
-  if (condition === 'approved') return 'approved';
-  if (condition === 'needs_fix') return 'needs-fix';
-  if (condition === 'need_replan') return 'need-replan';
+  if (condition === 'approved' || condition?.startsWith('approved &&')) return 'approved';
+  if (condition === 'needs_fix' || condition?.startsWith('needs_fix &&')) return 'needs-fix';
+  if (condition === 'need_replan' || condition?.startsWith('need_replan &&')) return 'need-replan';
   if (condition === aiNoIssues) return 'ai-no-issues';
   if (condition === aiIssues) return 'ai-issues';
   if (condition?.includes(locale === 'ja' ? '修正すべき' : 'fix required')) return 'fix-required';
@@ -235,7 +241,7 @@ function expectReviewRules(
 ): void {
   const rules = step.rules ?? [];
   expect(rules).toHaveLength(categories.length);
-  expect(rules.map((rule) => rule.next)).toEqual(next);
+  expect(rules.map((rule) => rule.next ?? rule.return)).toEqual(next);
   expect(rules.map((rule) => reviewRuleCategory(rule, locale))).toEqual(categories);
   for (const rule of rules) {
     expect(rule).not.toHaveProperty('appendix');
@@ -382,13 +388,9 @@ describe('builtin takt-default provider_options refs', () => {
       expect(normalizedSteps.get('fix')?.providerOptions).toMatchObject(EDIT_PROVIDER_OPTIONS);
 
       const finalGateWorkflow = loadBuiltinWorkflow(locale, 'merge-readiness-final-gate.yaml');
-      const finalGate = finalGateWorkflow.steps?.find((step) => step.name === 'final_gate');
-      const finalGateSteps = new Map((finalGate?.parallel ?? []).map((step) => [step.name, step]));
+      const finalGateSteps = new Map((finalGateWorkflow.steps ?? []).map((step) => [step.name, step]));
       const normalizedFinalGate = normalizeBuiltinWorkflow(finalGateWorkflow, locale);
-      const normalizedFinalGateStep = normalizedFinalGate.steps.find((step) => step.name === 'final_gate');
-      const normalizedFinalGateSteps = new Map(
-        (normalizedFinalGateStep?.parallel ?? []).map((step) => [step.name, step]),
-      );
+      const normalizedFinalGateSteps = new Map(normalizedFinalGate.steps.map((step) => [step.name, step]));
 
       expect(finalGateSteps.get('merge-readiness-review')?.provider_options).toEqual(REVIEW_READONLY_EXTENDS);
       expect(finalGateSteps.get('supervise')?.provider_options).toEqual(REVIEW_READONLY_EXTENDS);
@@ -398,6 +400,53 @@ describe('builtin takt-default provider_options refs', () => {
       expect(normalizedFinalGateSteps.get('supervise')?.providerOptions).toMatchObject(
         REVIEW_READONLY_PROVIDER_OPTIONS,
       );
+    });
+
+    it(`${locale} should run merge-readiness before every final supervisor`, () => {
+      let sequentialGateCount = 0;
+
+      for (const file of readdirSync(workflowDir(locale)).filter((name) => name.endsWith('.yaml'))) {
+        const workflow = loadBuiltinWorkflow(locale, file);
+        const steps = workflow.steps ?? [];
+
+        for (const step of steps) {
+          const parallel = step.parallel ?? [];
+          const hasMergeReadiness = parallel.some((child) => child.name === 'merge-readiness-review');
+          const hasSupervisor = parallel.some((child) => (
+            child.name !== 'merge-readiness-review'
+            && ((child.tags ?? []).includes('supervise') || ['supervisor', 'dual-supervisor'].includes(child.persona ?? ''))
+          ));
+          expect(hasMergeReadiness && hasSupervisor, `${file}:${step.name} must not race evidence production`).toBe(false);
+        }
+
+        const mergeReadinessIndex = steps.findIndex((step) => step.name === 'merge-readiness-review');
+        if (mergeReadinessIndex < 0) continue;
+        const supervisor = steps[mergeReadinessIndex + 1];
+        expect(supervisor, `${file}: supervisor must follow merge-readiness-review`).toBeDefined();
+        expect(
+          (supervisor?.tags ?? []).includes('supervise')
+            || ['supervisor', 'dual-supervisor'].includes(supervisor?.persona ?? ''),
+          `${file}: merge-readiness consumer`,
+        ).toBe(true);
+        const approvedRule = steps[mergeReadinessIndex].rules?.find((rule) => rule.condition?.startsWith('approved'));
+        expect(approvedRule?.next, `${file}: approved merge-readiness transition`).toBe(supervisor?.name);
+        sequentialGateCount += 1;
+      }
+
+      expect(sequentialGateCount).toBe(12);
+    });
+
+    it(`${locale} loop monitors should reference existing workflow steps`, () => {
+      for (const file of readdirSync(workflowDir(locale)).filter((name) => name.endsWith('.yaml'))) {
+        const workflow = loadBuiltinWorkflow(locale, file);
+        const stepNames = new Set((workflow.steps ?? []).map((step) => step.name));
+
+        for (const monitor of workflow.loop_monitors ?? []) {
+          for (const stepName of monitor.cycle ?? []) {
+            expect(stepNames.has(stepName), `${file}: loop monitor step ${stepName}`).toBe(true);
+          }
+        }
+      }
     });
 
     it(`${locale} takt-default should not enable Finding Contract`, () => {
@@ -470,7 +519,7 @@ describe('builtin takt-default provider_options refs', () => {
       expect(reviewers?.rules?.map((rule) => rule.condition)).toEqual([
         `all("approved", "${antipatternOk}", "approved", "approved", "approved", "approved") && when(findings.open.count == 0 && findings.conflicts.count == 0)`,
         // codex 対策#4 / 検証ブロッカー#1: product gate が空でも未昇格 anomaly が
-        // 残るなら fix へ落とさず final-gate（再レビュー/裁定）へ渡す。
+        // 残るなら fix へ落とさず merge-readiness-review（再レビュー/裁定）へ渡す。
         `any("approved", "needs_fix", "${antipatternOk}", "${antipatternNg}") && when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0)`,
         // 対策バッチ B1: provisional が直前ラウンドから意味的な変化の無い
         // fixpoint に達した場合、再計画では解消し得ない。plan への差し戻しの
@@ -502,82 +551,44 @@ describe('builtin takt-default provider_options refs', () => {
         aggregateGuardCondition: 'findings.conflicts.count == 0',
       });
 
-      // final-gate は merge-readiness-review と supervise の parallel。単独ステップだと
-      // Finding Contract の取り込みが並列親でしか動かず、merge-readiness の指摘が
-      // 台帳に載らず fix に届かない（reviewers と同じ aggregate 形の rules になる）。
-      const mergeReadiness = normalized.steps.find((step) => step.name === 'final-gate');
-      expect(mergeReadiness?.rules).toEqual([
-        // codex 対策#4 / 検証ブロッカー#1: review-integrity gate は COMPLETE より前。
-        // 未昇格 anomaly が残る限り COMPLETE させず、予算切れなら NEEDS_ADJUDICATION、
-        // それ以外は再レビュー（reviewers）へ。
-        expect.objectContaining({
-          condition: 'any("approved", "needs_fix", "need_replan") && when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0 && findings.reviewerAnomalies.budgetExhausted == true)',
-          isAggregateCondition: true,
-          aggregateType: 'any',
-          aggregateGuardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0 && findings.reviewerAnomalies.budgetExhausted == true',
-          next: 'NEEDS_ADJUDICATION',
-        }),
-        expect.objectContaining({
-          condition: 'any("approved", "needs_fix", "need_replan") && when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0)',
-          isAggregateCondition: true,
-          aggregateType: 'any',
-          aggregateGuardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0',
-          next: 'reviewers',
-        }),
-        expect.objectContaining({
-          isAggregateCondition: true,
-          aggregateType: 'all',
-          aggregateConditionText: 'approved',
-          aggregateGuardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0',
-          next: 'COMPLETE',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.provisional.fixpoint == true && findings.conflicts.count == 0)',
-          next: 'NEEDS_ADJUDICATION',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.rounds.budgetExhausted == true && findings.conflicts.count == 0)',
-          next: 'NEEDS_ADJUDICATION',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.provisional.count > 0 && findings.conflicts.count == 0)',
-          next: 'plan',
-        }),
-        expect.objectContaining({
-          isAggregateCondition: true,
-          aggregateType: 'any',
-          aggregateConditionText: 'need_replan',
-          aggregateGuardCondition: 'findings.conflicts.count == 0',
-          next: 'plan',
-        }),
-        expect.objectContaining({
-          isAggregateCondition: true,
-          aggregateType: 'any',
-          aggregateConditionText: 'needs_fix',
-          aggregateGuardCondition: 'findings.conflicts.count == 0',
-          next: 'fix',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.conflicts.count == 0 && findings.open.count > 0)',
-          next: 'fix',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.conflicts.count > 0 && findings.conflicts.unadjudicated.count > 0)',
-          next: 'finding-conflict-adjudication',
-        }),
-        expect.objectContaining({
-          condition: 'when(findings.conflicts.count > 0)',
-          next: 'ABORT',
-        }),
-      ]);
+      const finalGateStep = normalized.steps.find((step) => step.name === 'final-gate');
+      expect(finalGateStep).toMatchObject({
+        kind: 'workflow_call',
+        call: 'merge-readiness-finding-contract-final-gate-for-local-llm',
+      });
+      const finalGate = normalizeBuiltinWorkflow(
+        loadBuiltinWorkflow(locale, 'merge-readiness-finding-contract-final-gate-for-local-llm.yaml'),
+        locale,
+      );
+      expect(finalGate.subworkflow).toMatchObject({
+        callable: true,
+        requiresFindingContract: true,
+      });
+      const mergeReadiness = finalGate.steps.find((step) => step.name === 'merge-readiness-review');
+      const supervise = finalGate.steps.find((step) => step.name === 'supervise');
+      expect(mergeReadiness?.rules?.find((rule) => rule.condition === 'approved')).toMatchObject({
+        guardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0',
+        next: 'supervise',
+      });
+      expect(mergeReadiness?.rules?.find((rule) => rule.condition === 'needs_fix')).toMatchObject({
+        guardCondition: 'findings.conflicts.count == 0',
+        returnValue: 'needs_fix',
+      });
+      expect(supervise?.rules?.find((rule) => rule.condition === 'approved')).toMatchObject({
+        guardCondition: 'findings.open.count == 0 && findings.conflicts.count == 0',
+        next: 'COMPLETE',
+      });
+      expect(supervise?.rules?.find((rule) => rule.condition === 'need_replan')).toMatchObject({
+        guardCondition: 'findings.conflicts.count == 0',
+        returnValue: 'need_replan',
+      });
     });
 
     it(`${locale} peer-review should use standard output contracts`, () => {
       const workflow = loadBuiltinWorkflow(locale, 'peer-review.yaml');
       const reviewers = workflow.steps?.find((step) => step.name === 'reviewers')?.parallel ?? [];
       const finalGateWorkflow = loadBuiltinWorkflow(locale, 'merge-readiness-final-gate.yaml');
-      const finalGate = finalGateWorkflow.steps?.find((step) => step.name === 'final_gate');
-      const mergeReadiness = finalGate?.parallel?.find((step) => step.name === 'merge-readiness-review');
+      const mergeReadiness = finalGateWorkflow.steps?.find((step) => step.name === 'merge-readiness-review');
       const reviewerFormats = outputFormats(reviewers);
       const formats = outputFormats([...reviewers, ...(mergeReadiness ? [mergeReadiness] : [])]);
 
@@ -616,56 +627,50 @@ describe('builtin takt-default provider_options refs', () => {
         rule('when(findings.conflicts.count > 0 && findings.conflicts.unadjudicated.count > 0)', 'finding-conflict-adjudication'),
         rule('when(findings.conflicts.count > 0)', 'ABORT'),
       ];
-      const finalGate = (anomaly: string, retry: string) => [
-        rule(anomaly, 'NEEDS_ADJUDICATION'),
-        rule(retry, 'reviewers'),
-        rule('all("approved") && when(findings.open.count == 0 && findings.conflicts.count == 0)', 'COMPLETE'),
+      const finalGateRules = (successTarget: 'supervise' | 'COMPLETE', includeNeedReplan: boolean) => [
+        rule('when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0 && findings.reviewerAnomalies.budgetExhausted == true)', 'NEEDS_ADJUDICATION'),
+        rule('when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0)', 'needs_review'),
+        rule('approved && when(findings.open.count == 0 && findings.conflicts.count == 0)', successTarget),
         rule('when(findings.provisional.fixpoint == true && findings.conflicts.count == 0)', 'NEEDS_ADJUDICATION'),
         rule('when(findings.rounds.budgetExhausted == true && findings.conflicts.count == 0)', 'NEEDS_ADJUDICATION'),
-        rule('when(findings.provisional.count > 0 && findings.conflicts.count == 0)', 'plan'),
-        rule('any("need_replan") && when(findings.conflicts.count == 0)', 'plan'),
-        rule('any("needs_fix") && when(findings.conflicts.count == 0)', 'fix'),
-        rule('when(findings.conflicts.count == 0 && findings.open.count > 0)', 'fix'),
-        rule('when(findings.conflicts.count > 0 && findings.conflicts.unadjudicated.count > 0)', 'finding-conflict-adjudication'),
+        rule('when(findings.provisional.count > 0 && findings.conflicts.count == 0)', 'need_replan'),
+        ...(includeNeedReplan ? [rule('need_replan && when(findings.conflicts.count == 0)', 'need_replan')] : []),
+        rule('needs_fix && when(findings.conflicts.count == 0)', 'needs_fix'),
+        rule('when(findings.conflicts.count == 0 && findings.open.count > 0)', 'needs_fix'),
+        rule('when(findings.conflicts.count > 0 && findings.conflicts.unadjudicated.count > 0)', 'needs_conflict_adjudication'),
         rule('when(findings.conflicts.count > 0)', 'ABORT'),
       ];
       const anomaly = 'when(findings.open.count == 0 && findings.conflicts.count == 0 && findings.reviewerAnomalies.count > 0)';
-      const anomalyBudget = `${anomaly.slice(0, -1)} && findings.reviewerAnomalies.budgetExhausted == true)`;
       const defaultAnomaly = `any("approved", "needs_fix", "${aiApproved}", "${aiNeedsFix}") && ${anomaly}`;
-      const defaultAnomalyBudget = `any("approved", "needs_fix", "need_replan") && ${anomalyBudget}`;
-      const defaultRetry = `any("approved", "needs_fix", "need_replan") && ${anomaly}`;
-      const expectedRuleSignatures: Record<typeof family[number], { reviewers: ReturnType<typeof reviewers>; finalGate: ReturnType<typeof finalGate> }> = {
-        'takt-default-for-local-llm': {
-          reviewers: reviewers(
-            ['approved', aiApproved, 'approved', 'approved', 'approved', 'approved'],
-            defaultAnomaly,
-            ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix', 'needs_fix', 'needs_fix'],
-          ),
-          finalGate: finalGate(defaultAnomalyBudget, defaultRetry),
-        },
-        'frontend-for-local-llm': {
-          reviewers: reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
-          finalGate: finalGate(anomalyBudget, anomaly),
-        },
-        'backend-for-local-llm': {
-          reviewers: reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
-          finalGate: finalGate(anomalyBudget, anomaly),
-        },
-        'backend-cqrs-for-local-llm': {
-          reviewers: reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
-          finalGate: finalGate(anomalyBudget, anomaly),
-        },
-        'dual-for-local-llm': {
-          reviewers: reviewers(['approved', 'approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', 'needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
-          finalGate: finalGate(anomalyBudget, anomaly),
-        },
+      const expectedReviewerRules: Record<typeof family[number], ReturnType<typeof reviewers>> = {
+        'takt-default-for-local-llm': reviewers(
+          ['approved', aiApproved, 'approved', 'approved', 'approved', 'approved'],
+          defaultAnomaly,
+          ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix', 'needs_fix', 'needs_fix'],
+        ),
+        'frontend-for-local-llm': reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
+        'backend-for-local-llm': reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
+        'backend-cqrs-for-local-llm': reviewers(['approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
+        'dual-for-local-llm': reviewers(['approved', 'approved', aiApproved, 'approved', 'approved'], anomaly, ['needs_fix', 'needs_fix', aiNeedsFix, 'needs_fix', 'needs_fix']),
       };
+      const finalGateWorkflow = loadBuiltinWorkflow(
+        locale,
+        'merge-readiness-finding-contract-final-gate-for-local-llm.yaml',
+      );
+      const mergeReadiness = finalGateWorkflow.steps?.find((step) => step.name === 'merge-readiness-review');
+      const supervise = finalGateWorkflow.steps?.find((step) => step.name === 'supervise');
+      expect(ruleSignatures(mergeReadiness ?? {}), 'FC final gate:merge-readiness-review')
+        .toEqual(finalGateRules('supervise', false));
+      expect(ruleSignatures(supervise ?? {}), 'FC final gate:supervise')
+        .toEqual(finalGateRules('COMPLETE', true));
       for (const name of family) {
         const workflow = loadBuiltinWorkflow(locale, `${name}.yaml`);
         const rawReviewers = workflow.steps?.find((step) => step.name === 'reviewers');
-        const rawFinalGate = workflow.steps?.find((step) => step.name === 'final-gate');
-        expect(ruleSignatures(rawReviewers ?? {}), `${name}:reviewers`).toEqual(expectedRuleSignatures[name].reviewers);
-        expect(ruleSignatures(rawFinalGate ?? {}), `${name}:final-gate`).toEqual(expectedRuleSignatures[name].finalGate);
+        const finalGate = workflow.steps?.find((step) => step.name === 'final-gate');
+        expect(ruleSignatures(rawReviewers ?? {}), `${name}:reviewers`).toEqual(expectedReviewerRules[name]);
+        expect(finalGate?.call, `${name}:final-gate call`).toBe(
+          'merge-readiness-finding-contract-final-gate-for-local-llm',
+        );
       }
 
       const expectedNeedsFixCondition = `any("needs_fix", "${aiNeedsFix}")`;
@@ -684,10 +689,13 @@ describe('builtin takt-default provider_options refs', () => {
     it(`${locale} takt-default-for-local-llm should use Finding Contract-specific output contracts`, () => {
       const workflow = loadBuiltinWorkflow(locale, 'takt-default-for-local-llm.yaml');
       const reviewers = workflow.steps?.find((step) => step.name === 'reviewers')?.parallel ?? [];
-      const finalGate = workflow.steps?.find((step) => step.name === 'final-gate');
-      const mergeReadinessChild = finalGate?.parallel?.find((step) => step.name === 'merge-readiness-review');
+      const finalGateWorkflow = loadBuiltinWorkflow(
+        locale,
+        'merge-readiness-finding-contract-final-gate-for-local-llm.yaml',
+      );
+      const mergeReadiness = finalGateWorkflow.steps?.find((step) => step.name === 'merge-readiness-review');
       const reviewerFormats = outputFormats(reviewers);
-      const formats = outputFormats([...reviewers, ...(mergeReadinessChild ? [mergeReadinessChild] : [])]);
+      const formats = outputFormats([...reviewers, ...(mergeReadiness ? [mergeReadiness] : [])]);
 
       const expectedReviewerContracts = [
         'architecture-review',
@@ -870,8 +878,8 @@ describe('builtin takt-default provider_options refs', () => {
           reportFormat: 'robustness-review-finding-contract',
         },
       ]);
-      const finalGateReviewers = workflow.steps?.find((step) => step.name === 'final-gate')?.parallel ?? [];
-      expect(finalGateReviewers.map((reviewer) => reviewer.session)).toEqual([undefined, undefined]);
+      expect(workflow.steps?.find((step) => step.name === 'merge-readiness-review')?.session).toBeUndefined();
+      expect(workflow.steps?.find((step) => step.name === 'supervise')?.session).toBeUndefined();
 
       const contractNames = [
         'architecture-review-finding-contract',
@@ -1038,11 +1046,27 @@ describe('builtin takt-default provider_options refs', () => {
       }
       expect(readFileSync(instructionPath(locale, 'review-coding-for-local-llm'), 'utf-8')).not.toMatch(/表を使う|table|2表|two.*tables/i);
 
+      const finalGateWorkflow = loadBuiltinWorkflow(
+        locale,
+        'merge-readiness-finding-contract-final-gate-for-local-llm.yaml',
+      );
+      const finalGateSteps = collectSteps(finalGateWorkflow.steps ?? []);
+      const mergeReadinessEntry = finalGateSteps.find(({ path }) => path === 'merge-readiness-review');
+      const superviseEntry = finalGateSteps.find(({ path }) => path === 'supervise');
+      expect(mergeReadinessEntry, 'FC final gate should include merge-readiness review').toBeDefined();
+      expect(superviseEntry, 'FC final gate should include supervisor').toBeDefined();
+      if (mergeReadinessEntry === undefined || superviseEntry === undefined) {
+        throw new Error('FC final gate is missing a required review step');
+      }
+
       for (const name of readdirSync(workflowDir(locale)).filter((file) => file.endsWith('.yaml'))) {
         const workflow = loadBuiltinWorkflow(locale, name);
         const steps = collectSteps(workflow.steps ?? []);
         const formats = steps.flatMap(({ step }) => outputFormats([step]));
-        if (workflow.finding_contract === undefined) {
+        if (
+          workflow.finding_contract === undefined
+          && workflow.subworkflow?.requires_finding_contract !== true
+        ) {
           expect(formats, name).not.toContainEqual(expect.stringMatching(/-finding-contract$/));
         }
       }
@@ -1053,26 +1077,29 @@ describe('builtin takt-default provider_options refs', () => {
         const firstAiReviewEntry = steps.find(({ step }) => step.name === 'ai-antipattern-review-1st');
         const parallelAiReviewEntry = steps.find(({ path }) => path === 'reviewers/ai-antipattern-review');
         const reviewersEntry = steps.find(({ step }) => step.name === 'reviewers');
-        const mergeReadinessEntry = steps.find(({ path }) => path === 'final-gate/merge-readiness-review');
-        const superviseEntry = steps.find(({ path }) => path === 'final-gate/supervise');
+        const finalGateEntry = steps.find(({ path }) => path === 'final-gate');
         const aiAntipatternNoFixEntry = steps.find(({ path }) => path === 'ai-antipattern-no-fix');
 
         expect(firstAiReviewEntry, `${name} should include the first AI review step`).toBeDefined();
         expect(parallelAiReviewEntry, `${name} should include the parallel AI review step`).toBeDefined();
         expect(reviewersEntry, `${name} should include the reviewers step`).toBeDefined();
-        expect(mergeReadinessEntry, `${name} should include the merge-readiness review step`).toBeDefined();
-        expect(superviseEntry, `${name} should include the supervisor step`).toBeDefined();
+        expect(finalGateEntry, `${name} should include the FC final gate call`).toBeDefined();
         expect(aiAntipatternNoFixEntry, `${name} should include the AI antipattern adjudication step`).toBeDefined();
         if (
           firstAiReviewEntry === undefined
           || parallelAiReviewEntry === undefined
           || reviewersEntry === undefined
-          || mergeReadinessEntry === undefined
-          || superviseEntry === undefined
+          || finalGateEntry === undefined
           || aiAntipatternNoFixEntry === undefined
         ) {
           throw new Error(`${name} is missing a required Finding Contract review step`);
         }
+        expect(finalGateEntry.step.call).toBe(
+          'merge-readiness-finding-contract-final-gate-for-local-llm',
+        );
+        expect(finalGateEntry.step.args).toEqual({
+          supervise_knowledge: superviseKnowledgeByWorkflow[name],
+        });
 
         expect(reviewStepConfiguration(firstAiReviewEntry.step)).toEqual(expectedReviewStep({
           name: 'ai-antipattern-review-1st', persona: 'ai-antipattern-reviewer', policy: ['review', 'ai-antipattern'],
@@ -1126,10 +1153,15 @@ describe('builtin takt-default provider_options refs', () => {
           provider_options: { extends: 'review-readonly' },
           report: [{ name: 'merge-readiness-review.md', format: 'merge-readiness-review-finding-contract' }],
         }));
-        expectReviewRules(mergeReadinessEntry.step, locale, ['approved', 'needs-fix'], [undefined, undefined]);
+        expectReviewRules(
+          mergeReadinessEntry.step,
+          locale,
+          ['anomaly', 'anomaly', 'approved', 'fixpoint', 'budget-exhausted', 'provisional', 'needs-fix', 'open-findings', 'unadjudicated-conflicts', 'conflicts'],
+          ['NEEDS_ADJUDICATION', 'needs_review', 'supervise', 'NEEDS_ADJUDICATION', 'NEEDS_ADJUDICATION', 'need_replan', 'needs_fix', 'needs_fix', 'needs_conflict_adjudication', 'ABORT'],
+        );
 
         expect(reviewStepConfiguration(superviseEntry.step)).toEqual(expectedReviewStep({
-          name: 'supervise', persona: 'supervisor', policy: 'review', knowledge: superviseKnowledgeByWorkflow[name],
+          name: 'supervise', persona: 'supervisor', policy: 'review', knowledge: { $param: 'supervise_knowledge' },
           instruction: 'supervise-finding-contract', session: undefined, session_key: undefined,
           provider_options: { extends: 'review-readonly' },
           report: [
@@ -1137,7 +1169,12 @@ describe('builtin takt-default provider_options refs', () => {
             { name: 'supervisor-gate-summary.md', format: 'supervisor-gate-summary-finding-contract', use_judge: false },
           ],
         }));
-        expectReviewRules(superviseEntry.step, locale, ['approved', 'needs-fix', 'need-replan'], [undefined, undefined, undefined]);
+        expectReviewRules(
+          superviseEntry.step,
+          locale,
+          ['anomaly', 'anomaly', 'approved', 'fixpoint', 'budget-exhausted', 'provisional', 'need-replan', 'needs-fix', 'open-findings', 'unadjudicated-conflicts', 'conflicts'],
+          ['NEEDS_ADJUDICATION', 'needs_review', 'COMPLETE', 'NEEDS_ADJUDICATION', 'NEEDS_ADJUDICATION', 'need_replan', 'need_replan', 'needs_fix', 'needs_fix', 'needs_conflict_adjudication', 'ABORT'],
+        );
       }
 
       const findingContracts = new Set<string>();
