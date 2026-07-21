@@ -203,6 +203,7 @@ describe('session compaction Phase 1 wiring', () => {
       getWorkflowDefinitionSteps: () => [step],
       getWorkflowName: () => 'test-workflow',
       getWorkflowDescription: () => undefined,
+      getInheritedPeerReportPaths: () => [],
       getRetryNote: () => undefined,
       detectRuleIndex: vi.fn().mockReturnValue(-1),
       structuredCaller: {
@@ -251,6 +252,7 @@ describe('session compaction Phase 1 wiring', () => {
       getWorkflowDefinitionSteps: () => [step],
       getWorkflowName: () => 'test-workflow',
       getWorkflowDescription: () => undefined,
+      getInheritedPeerReportPaths: () => [],
       getRetryNote: () => undefined,
       detectRuleIndex: vi.fn().mockReturnValue(-1),
       structuredCaller: {
@@ -305,6 +307,7 @@ describe('session compaction Phase 1 wiring', () => {
       getWorkflowDefinitionSteps: () => [step],
       getWorkflowName: () => 'test-workflow',
       getWorkflowDescription: () => undefined,
+      getInheritedPeerReportPaths: () => [],
       getRetryNote: () => undefined,
       detectRuleIndex: vi.fn().mockReturnValue(-1),
       structuredCaller: {
@@ -401,6 +404,7 @@ describe('session compaction Phase 1 wiring', () => {
       getWorkflowDefinitionSteps: () => [step],
       getWorkflowName: () => 'test-workflow',
       getWorkflowDescription: () => undefined,
+      getInheritedPeerReportPaths: () => [],
       getRetryNote: () => undefined,
       detectRuleIndex: vi.fn().mockReturnValue(-1),
       structuredCaller: {

@@ -17,6 +17,7 @@ import type { RunPaths } from '../run/run-paths.js';
 import { trimResumePointStackForWorkflow } from '../run/resume-point.js';
 import { resolveEffectiveAutoRouting } from '../auto-routing/effective-auto-routing.js';
 import { buildWorkflowResumePointEntry, workflowEntryMatchesWorkflow } from '../workflow-reference.js';
+import { buildWorkflowCallNamespaceSegment } from '../workflow-call-namespace.js';
 import type {
   StepProviderInfo,
   WorkflowAbortKind,
@@ -36,14 +37,6 @@ export type WorkflowCallSessionUpdates = ReadonlyMap<string, WorkflowCallSession
 export interface WorkflowCallIsolatedStateSync {
   iteration: number;
   maxSteps?: WorkflowMaxSteps;
-}
-
-function encodeWorkflowNamespaceValue(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function buildWorkflowCallNamespaceSegment(stepName: string, workflowName: string, iteration: number): string {
-  return `iteration-${iteration}--step-${encodeWorkflowNamespaceValue(stepName)}--workflow-${encodeWorkflowNamespaceValue(workflowName)}`;
 }
 
 function applyWorkflowCallOverridesToProviderEntries<T extends PersonaProviderEntry>(
