@@ -1202,6 +1202,23 @@ provider_options:
     runtime_mode: exe                  # exe または node
 ```
 
+DeepSeek Harness の `model` フィールドは、`deepseek-v4-flash` のような
+model 参照だけの形式と、`openai/gpt-5.4` や
+`my-gateway/org/custom-model` のような `<route>/<model>` 形式を受け付けます。
+最初の `/` より前を provider route として使い、それより後の `/` は model
+参照の一部として保持します。route を省略した場合は後方互換のため
+`deepseek-official` を使います。route は記述された値のまま公式 SDK に渡し、TAKT
+独自の allowlist や provider alias 変換は行いません。route と model の各部分は、
+前後の空白や model 内の `:` も含め、記述された値のまま渡します。TAKT は model
+部分を不透明な model ID として扱います。たとえば `ollama/qwen3.5:397b` は完全な
+model ID のまま SDK の解釈に委ねます。
+空文字列、`/gpt-5.4`（空の route）、`openai/`（空の model）などの形式不正は
+bridge 起動前に拒否されます。空白だけの route または model も空として扱います。
+エラーには入力された参照と検証箇所が含まれます。未知の route や model ID は TAKT
+で事前検証せず、記述された値のまま provider と model の別フィールドとして
+bridge/SDK に渡します。SDK が拒否した場合は、入力された参照と bridge/SDK で
+失敗した箇所を含むエラーになります。
+
 credential safety のため、`python_path` は信頼できる global config または `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_PYTHON_PATH` からのみ設定できます。workflow と project-local provider options では既定の `python3` executable を使用してください。`cordis` も実行する tool composition を選択するため、信頼できる global config または `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_CORDIS` からのみ設定できます。上の例では両方の項目を意図的に省略しています。同じ制約は project の `runtime.yaml` profile にも適用されます。global runtime profile では信頼できる値を選択できます。project runtime profile の `base_url` は loopback のみ使用できます。
 
 `session_root` と `cordis` は設定された作業ディレクトリからの相対パスとして解決されます。workflow が `session_key` を指定するとセッションを再利用し、one-shot call は bridge を直ちに close します。`request_timeout_ms` は Python bridge request 全体を終了させ、TAKT call の abort は bridge の process tree を終了させます。公式 `session.event` notification は TAKT の text、thinking、tool-use、tool-result、error、result event へ変換されます。system prompt、TAKT の `allowed_tools`、MCP server map、画像添付、structured output、permission mode、`maxTurns` は公式 SDK の call に存在しないため warning とともに無視されます。system/tool composition は Cordis で設定してください。
