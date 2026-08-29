@@ -589,14 +589,16 @@ version: 1
 companion:
   enabled: true
   review_mode: completion # completion | live
+  fix_policy: single      # single | loop
 ```
 
-`companion` ポリシーには `enabled` または `review_mode` の少なくとも一方を
-指定します。`companion: { review_mode: live }` のような mode 単独指定は受理され、
+`companion` ポリシーには `enabled`、`review_mode`、`fix_policy` の少なくとも一方を
+指定します。`companion: { review_mode: live }` や
+`companion: { fix_policy: loop }` のような mode または fix policy 単独指定は受理され、
 `enabled: false` として解決されます。空の `companion: {}` は拒否されます。
 
-global と project の両方にポリシーがある場合、その値は論理積で合成されるため、global
-側で無効化した companion を project 側の `true` で再有効化することはできません。
+global と project の両方にポリシーがある場合、`enabled` の値は論理積で合成されるため、
+global 側で無効化した companion を project 側の `true` で再有効化することはできません。
 レイヤー合成時に未指定のポリシーは中立として扱い、両方とも未指定なら companion は
 無効のままです。
 
@@ -605,7 +607,13 @@ global と project の両方にポリシーがある場合、その値は論理�
 エージェントの成功応答後に累積差分をレビューし、`live` は応答中の quiet、forced、
 commit 発火を維持します。指定できる値は `completion` と `live` だけで、無効な値は
 `runtime.yaml` の読み込み時にエラーになります。`companion.enabled` が `false` でも
-mode の構造は検証されますが、Companion provider の解決と実行は行われません。
+mode と fix policy の構造は検証されますが、Companion provider の解決と実行は行われません。
+
+`companion.fix_policy` の既定値は `single` です。project に指定した値は global を
+上書きし、project で省略した場合は global の値を継承します。`single` は初回レビュー後に
+advisory な修正 follow-up を最大 1 回だけ実行し、その follow-up の再レビューは行いません。
+`loop` は従来のレビューと修正の反復動作を維持します。指定できる値は `single` と `loop`
+だけで、無効な値は `runtime.yaml` の読み込み時にエラーになります。
 
 companion の provider target（`targets.companions`）とプロバイダ能力要件が適用されるのは
 companion が有効な間だけです。無効時も companion 宣言と `targets.companions` の構造検証は

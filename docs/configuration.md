@@ -597,13 +597,15 @@ version: 1
 companion:
   enabled: true
   review_mode: completion # completion | live
+  fix_policy: single      # single | loop
 ```
 
-The `companion` policy must specify at least one of `enabled` or `review_mode`.
-A mode-only policy such as `companion: { review_mode: live }` is accepted and
-resolves to `enabled: false`; an empty `companion: {}` policy is rejected.
+The `companion` policy must specify at least one of `enabled`, `review_mode`, or `fix_policy`.
+A mode-only or fix-policy-only policy such as `companion: { review_mode: live }` or
+`companion: { fix_policy: loop }` is accepted and resolves to `enabled: false`;
+an empty `companion: {}` policy is rejected.
 
-When both global and project policies are specified, their values are combined
+When both global and project policies are specified, their `enabled` values are combined
 with logical AND; a project value of `true` cannot re-enable a globally disabled
 companion. An omitted policy is neutral during layer merging, and Companion
 remains disabled when neither layer specifies one.
@@ -613,8 +615,14 @@ global value, and a project omission inherits the global value. `completion`
 reviews the cumulative diff after a successful implementer response; `live`
 preserves quiet, forced, and commit-triggered reviews during the response. Only
 `completion` and `live` are accepted, and invalid values fail while loading
-`runtime.yaml`. The mode is validated even when `companion.enabled` is `false`,
-but no Companion provider is resolved or executed in that case.
+`runtime.yaml`. The mode and fix policy are validated even when `companion.enabled`
+is `false`, but no Companion provider is resolved or executed in that case.
+
+`companion.fix_policy` defaults to `single`. The project value overrides the
+global value, and a project omission inherits the global value. `single` performs
+at most one advisory fix follow-up after the initial review and does not re-review
+the follow-up; `loop` preserves the repeated review-and-fix behavior. Only `single`
+and `loop` are accepted, and invalid values fail while loading `runtime.yaml`.
 
 Companion provider targets (`targets.companions`) and provider capability
 requirements apply only while companions are enabled. When disabled, companion
