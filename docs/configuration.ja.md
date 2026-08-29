@@ -1288,9 +1288,14 @@ Codex 側へ権限制御を委譲する場合だけ、明示的に opt-in しま
 provider_options:
   codex:
     permission_control: codex
+    network_access: true
+    reasoning_effort: high
+    fast_mode: true
+    skills:
+      repo: true
 ```
 
-`permission_control: codex` では通常の Codex 呼び出しと strict isolated structured 呼び出しの両方で TAKT は `sandboxMode` と `networkAccessEnabled` を渡しません。実効権限は Codex の `config.toml`、`default_permissions`、permission profile に委譲されます。非対話実行を成立させるため `approvalPolicy: never` は引き続き設定されます。`permission_control: codex` と `network_access` は併用できず、解決後に両方が残る設定は fail fast で拒否されます。明示的な opt-in のため、権限の結果は利用者の自己責任です。
+`permission_control: codex` では通常の Codex 呼び出しと strict isolated structured 呼び出しの両方で TAKT は `sandboxMode` と `networkAccessEnabled` を渡しません。実効権限は Codex の `config.toml`、`default_permissions`、permission profile に委譲されます。capability、runtime profile、routing、project／global 設定、環境変数 override のいずれから解決された場合も、`network_access` は警告なしで受理され、これらの Codex 権限フィールドには使用されません。非対話実行を成立させるため `approvalPolicy: never` は引き続き設定され、`reasoning_effort`、`fast_mode`、`skills` などの非権限制御 option も従来どおり適用されます。明示的な opt-in のため、権限の結果は利用者の自己責任です。
 
 #### Codex Skill の継承 (`skills`)
 

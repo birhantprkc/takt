@@ -1350,9 +1350,14 @@ To delegate permission control to Codex, explicitly opt in:
 provider_options:
   codex:
     permission_control: codex
+    network_access: true
+    reasoning_effort: high
+    fast_mode: true
+    skills:
+      repo: true
 ```
 
-With `permission_control: codex`, TAKT omits both `sandboxMode` and `networkAccessEnabled` from every Codex call, including strict isolated structured calls. Codex's `config.toml`, `default_permissions`, and permission profile determine the effective permissions. TAKT still sets `approvalPolicy: never` for non-interactive execution. `permission_control: codex` cannot be combined with `network_access`; the resolved configuration fails fast when both remain set. This is an explicit opt-in and its permission behavior is the user's responsibility.
+With `permission_control: codex`, TAKT omits both `sandboxMode` and `networkAccessEnabled` from every Codex call, including strict isolated structured calls. Codex's `config.toml`, `default_permissions`, and permission profile determine the effective permissions. A resolved `network_access` value is accepted without a warning and ignored for these Codex permission fields, regardless of whether it came from a capability, runtime profile, routing, project or global configuration, or an environment override. TAKT still sets `approvalPolicy: never` for non-interactive execution. Non-permission options such as `reasoning_effort`, `fast_mode`, and `skills` continue to apply. This is an explicit opt-in and its permission behavior is the user's responsibility.
 
 #### Codex Skill inheritance (`skills`)
 

@@ -960,9 +960,14 @@ Codex 默认使用 TAKT 的权限映射，相当于 `permission_control: takt`�
 provider_options:
   codex:
     permission_control: codex
+    network_access: true
+    reasoning_effort: high
+    fast_mode: true
+    skills:
+      repo: true
 ```
 
-使用 `permission_control: codex` 时，TAKT 从每次 Codex 调用中省略 `sandboxMode` 和 `networkAccessEnabled`，由 Codex 的 `config.toml`、`default_permissions` 和 permission profile 决定实际权限。它不能与 `network_access` 同时设置；同时存在会快速失败。
+使用 `permission_control: codex` 时，TAKT 从每次 Codex 调用（包括 strict isolated structured 调用）中省略 `sandboxMode` 和 `networkAccessEnabled`，由 Codex 的 `config.toml`、`default_permissions` 和 permission profile 决定实际权限。无论 `network_access` 来自 capability、runtime profile、routing、项目或全局配置，还是环境变量覆盖，解析后的值都会被接受且不会产生警告，但不会用于这些 Codex 权限字段。非交互执行仍会设置 `approvalPolicy: never`，`reasoning_effort`、`fast_mode`、`skills` 等非权限控制选项也会继续生效。
 
 #### Codex Skill 继承（`skills`）
 
