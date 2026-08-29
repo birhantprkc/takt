@@ -98,6 +98,7 @@ type RawProviderOptions = {
   pi?: {
     guards?: RawProviderGuardOptions;
     extensions?: string[];
+    thinking_level?: string;
     no_extensions?: boolean;
     no_skills?: boolean;
     no_prompt_templates?: boolean;
@@ -525,6 +526,7 @@ export function normalizeProviderOptions(
   if (options.pi !== undefined) {
     const pi: PiProviderOptions = {
       ...(options.pi.extensions !== undefined ? { extensions: [...options.pi.extensions] } : {}),
+      ...(options.pi.thinking_level !== undefined ? { thinkingLevel: options.pi.thinking_level } : {}),
       ...(options.pi.no_extensions !== undefined ? { noExtensions: options.pi.no_extensions } : {}),
       ...(options.pi.no_skills !== undefined ? { noSkills: options.pi.no_skills } : {}),
       ...(options.pi.no_prompt_templates !== undefined
@@ -766,6 +768,7 @@ export function mergeProviderOptions(
           ? { guards: { ...result.pi?.guards, ...layer.pi.guards } }
           : {}),
         ...(layer.pi.extensions !== undefined ? { extensions: [...layer.pi.extensions] } : {}),
+        ...(layer.pi.thinkingLevel !== undefined ? { thinkingLevel: layer.pi.thinkingLevel } : {}),
         ...(layer.pi.noExtensions !== undefined ? { noExtensions: layer.pi.noExtensions } : {}),
         ...(layer.pi.noSkills !== undefined ? { noSkills: layer.pi.noSkills } : {}),
         ...(layer.pi.noPromptTemplates !== undefined
@@ -1189,6 +1192,12 @@ export function resolveEffectiveProviderOptions(
     stepOptions?.pi?.extensions,
     resolveProviderOptionOrigin(originResolver, 'pi.extensions', source),
   );
+  const piThinkingLevel = selectProviderValue(
+    resolvedConfigOptions.pi?.thinkingLevel,
+    personaOptions?.pi?.thinkingLevel,
+    stepOptions?.pi?.thinkingLevel,
+    resolveProviderOptionOrigin(originResolver, 'pi.thinkingLevel', source),
+  );
   const piNoExtensions = selectProviderValue(
     resolvedConfigOptions.pi?.noExtensions,
     personaOptions?.pi?.noExtensions,
@@ -1416,6 +1425,7 @@ export function resolveEffectiveProviderOptions(
         }
       : {}),
     ...(piExtensions !== undefined
+      || piThinkingLevel !== undefined
       || piCallTimeoutMs !== undefined
       || piNoExtensions !== undefined
       || piNoSkills !== undefined
@@ -1428,6 +1438,7 @@ export function resolveEffectiveProviderOptions(
               ? { guards: { callTimeoutMs: piCallTimeoutMs } }
               : {}),
             ...(piExtensions !== undefined ? { extensions: [...piExtensions] } : {}),
+            ...(piThinkingLevel !== undefined ? { thinkingLevel: piThinkingLevel } : {}),
             ...(piNoExtensions !== undefined ? { noExtensions: piNoExtensions } : {}),
             ...(piNoSkills !== undefined ? { noSkills: piNoSkills } : {}),
             ...(piNoPromptTemplates !== undefined ? { noPromptTemplates: piNoPromptTemplates } : {}),
@@ -1518,6 +1529,9 @@ function stripClaudeAllowedTools(
               : {}),
             ...(providerOptions.pi.extensions !== undefined
               ? { extensions: [...providerOptions.pi.extensions] }
+              : {}),
+            ...(providerOptions.pi.thinkingLevel !== undefined
+              ? { thinkingLevel: providerOptions.pi.thinkingLevel }
               : {}),
             ...(providerOptions.pi.noExtensions !== undefined
               ? { noExtensions: providerOptions.pi.noExtensions }
@@ -1611,6 +1625,7 @@ export const PROVIDER_OPTION_PATHS = [
   'deepseekHarness.shutdownTimeoutMs',
   'deepseekHarness.runtimeMode',
   'pi.extensions',
+  'pi.thinkingLevel',
   'pi.guards.callTimeoutMs',
   'pi.noExtensions',
   'pi.noSkills',

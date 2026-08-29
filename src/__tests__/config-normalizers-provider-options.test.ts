@@ -8,15 +8,28 @@ import { normalizeProviderOptions } from '../infra/config/providerOptions.js';
 import { StepProviderOptionsObjectSchema } from '../core/models/schema-base.js';
 import type { StepProviderOptions } from '../core/models/workflow-provider-options.js';
 
-describe('Codex fast mode provider option schema', () => {
-  it.each([true, false])('accepts an explicit boolean value: %s', (fastMode) => {
+describe('provider option schema', () => {
+  it.each([true, false])('accepts an explicit Codex boolean value: %s', (fastMode) => {
     expect(StepProviderOptionsObjectSchema.parse({ codex: { fast_mode: fastMode } })).toEqual({
       codex: { fast_mode: fastMode },
     });
   });
 
-  it('rejects a non-boolean fast mode value', () => {
+  it('rejects a non-boolean Codex fast mode value', () => {
     expect(() => StepProviderOptionsObjectSchema.parse({ codex: { fast_mode: 'true' } })).toThrow();
+  });
+
+  it.each(['high', 'thikning'])('accepts a non-empty Pi thinking_level string: %s', (thinkingLevel) => {
+    expect(StepProviderOptionsObjectSchema.parse({ pi: { thinking_level: thinkingLevel } })).toEqual({
+      pi: { thinking_level: thinkingLevel },
+    });
+  });
+
+  it.each([
+    ['non-string', true],
+    ['empty string', ''],
+  ])('rejects a %s Pi thinking_level value', (_label, thinkingLevel) => {
+    expect(() => StepProviderOptionsObjectSchema.parse({ pi: { thinking_level: thinkingLevel } })).toThrow();
   });
 });
 
@@ -324,10 +337,11 @@ describe('denormalizeProviderOptions', () => {
     expect(denormalizedProviderOptions).toEqual(rawProviderOptions);
   });
 
-  it('should round-trip Pi SDK resource options through normalize and denormalize', () => {
+  it('should round-trip Pi SDK resource and thinking options through normalize and denormalize', () => {
     const rawProviderOptions = {
       pi: {
         extensions: ['npm:example-extension'],
+        thinking_level: 'high',
         no_extensions: true,
         no_skills: false,
         no_prompt_templates: false,
@@ -342,6 +356,7 @@ describe('denormalizeProviderOptions', () => {
     expect(normalizedProviderOptions).toEqual({
       pi: {
         extensions: ['npm:example-extension'],
+        thinkingLevel: 'high',
         noExtensions: true,
         noSkills: false,
         noPromptTemplates: false,
@@ -420,6 +435,24 @@ describe('buildRawTaktProvidersOrThrow', () => {
       assistant: {
         provider: 'claude',
         model: 'haiku',
+      },
+    });
+  });
+
+  it('should round-trip Pi thinking level through selector provider options', () => {
+    const normalized = normalizeTaktSelectorProvider({
+      provider: 'pi',
+      provider_options: { pi: { thinking_level: 'high' } },
+    });
+
+    expect(normalized).toEqual({
+      provider: 'pi',
+      providerOptions: { pi: { thinkingLevel: 'high' } },
+    });
+    expect(buildRawTaktProvidersOrThrow({ selector: normalized })).toEqual({
+      selector: {
+        provider: 'pi',
+        provider_options: { pi: { thinking_level: 'high' } },
       },
     });
   });

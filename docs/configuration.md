@@ -320,26 +320,32 @@ ignore_exceed: false          # Applies to takt run and takt watch like --ignore
 
 The TAKT Pi provider uses an embedded, in-memory Pi SDK session for the current TAKT process. It does not write Pi session JSONL files, and it does not read or write the Pi CLI global `settings.json`. Consequently, Pi global settings such as the default model, thinking level, shell, and retry options are not automatically inherited by TAKT.
 
-Set the model explicitly in TAKT configuration when it should be the default for Pi. A Pi model can include a `:<thinking-level>` suffix, for example:
+Set the model explicitly in TAKT configuration when it should be the default for Pi. Keep model selection and thinking-level selection separate. In legacy `config.yaml` mode, use the explicit option as the recommended form:
 
 ```yaml
 # ~/.takt/config.yaml or .takt/config.yaml
 provider: pi
-model: provider/model:high
+model: provider/model
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-You can also set the model and thinking level on a workflow step:
+In runtime mode, put `thinking_level` in `provider.profiles.<name>.options` for the Pi profile. Workflow YAML cannot define provider, model, or provider options.
+
+Configure Pi thinking level only with `provider_options.pi.thinking_level` or `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL`. The accepted values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; an invalid value fails. If the option is omitted, the Pi SDK default `medium` is used. Model references are split only at `/`, so any `:` in the model ID is literal; for example, `provider/model:high` uses `model:high` as the model ID. An explicitly configured level is applied before every Pi turn, including turns in a reused session.
+
+To migrate an older configuration that used `model: pi/...:high` to select a thinking level, remove `:high` from the model reference and set the option instead:
 
 ```yaml
-steps:
-  - name: implement
-    provider: pi
-    model: provider/model:high
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-The `provider` and `model` declarations select the provider, model, and thinking level for a TAKT run; they do not import Pi CLI settings. Pi authentication is handled separately through the Pi SDK credential store or provider-native environment variables. The boundary avoids unintended writes to global settings and keeps project-local configuration trustworthy and predictable.
+The `provider` and `model` declarations select the provider and model for a TAKT run; the explicit Pi option selects the thinking level. They do not import Pi CLI settings. Pi authentication is handled separately through the Pi SDK credential store or provider-native environment variables. The boundary avoids unintended writes to global settings and keeps project-local configuration trustworthy and predictable.
 
-`provider_options.pi` is a separate path for loading Pi resources such as `extensions` and `no_*` discovery controls. These options do not declare authentication, model, or thinking level. Bare explicit npm sources reuse an existing project-scope install, then an existing user-scope install, and fall back to temporary resolution only when neither candidate loads successfully; version-qualified npm sources and non-npm sources are always resolved temporarily. Explicit sources are not persisted to Pi settings; see [Pi resource loading](#pi-resource-loading) for the resource trust boundary.
+`provider_options.pi` contains the separate `thinking_level` option and Pi resource-loading controls such as `extensions` and `no_*` discovery controls. It does not configure authentication or model selection. Bare explicit npm sources reuse an existing project-scope install, then an existing user-scope install, and fall back to temporary resolution only when neither candidate loads successfully; version-qualified npm sources and non-npm sources are always resolved temporarily. Explicit sources are not persisted to Pi settings; see [Pi resource loading](#pi-resource-loading) for the resource trust boundary.
 
 ### Provider inactivity deadline and OpenCode execution guards
 
@@ -561,7 +567,7 @@ Provider and model selection is owned by `runtime.yaml` when runtime mode is act
 
 **OpenCode** requires a model in `provider/model` format (e.g., `opencode/big-pickle`). Omitting the model for the OpenCode provider will result in a configuration error.
 
-**Pi** accepts `provider/model` references and bare model IDs that uniquely match a configured Pi model. A recognized `:<thinking-level>` suffix selects the Pi thinking level. If omitted, TAKT keeps the Pi session's current model.
+**Pi** accepts `provider/model` references and bare model IDs that uniquely match a configured Pi model. References are split only at `/`, so `provider/model:high` uses `model:high` as a literal model ID. Configure thinking level with `provider_options.pi.thinking_level` or `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL`; if omitted, Pi uses the SDK default `medium`. An explicitly configured level is applied on every Pi turn. If the model is omitted, TAKT keeps the Pi session's current model.
 
 **Cursor Agent** forwards `model` directly to `cursor-agent --model <model>`. If omitted, Cursor CLI default is used.
 
@@ -1209,7 +1215,7 @@ Capability references can load shared provider-options presets by name. Names ar
 
 Capability preset resolution fails fast as a configuration error when a preset or path cannot be resolved, a scoped ref points to an unavailable repertoire package, the target YAML is invalid or is not a provider-options object, the extends chain is circular, or the removed `$ref` key is used. Relative paths are resolved from the workflow file and must stay inside the workflow directory after symlink resolution; absolute paths and paths whose real target escapes that directory are rejected.
 
-Provider option leaves can also be overridden from env. For OpenCode model variants, use `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high` to set `provider_options.opencode.variant`. For provider base URLs, use `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` or `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787`; these populate the config layer and do not override step or workflow routing `base_url` leaves. For DeepSeek Harness, use `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1` for a user-controlled endpoint. The official SDK reads `DEEPSEEK_API_KEY` and optional `DEEPSEEK_BASE_URL`; TAKT passes those values only to the private Python bridge. For Codex permission control, use `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=takt` or `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=codex`. For Codex Skill inheritance, use `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO=true` or `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER=true`. For Claude Skill inheritance, use `TAKT_PROVIDER_OPTIONS_CLAUDE_SKILLS_ENABLED=true`. For Claude terminal, use `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_BACKEND=tmux`, `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TIMEOUT_MS=900000`, `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_KEEP_SESSION=false`, or `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TRANSCRIPT_POLL_INTERVAL_MS=500`. For Kiro custom agents, use `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent` to set `provider_options.kiro.agent`. For Pi resource loading, use `TAKT_PROVIDER_OPTIONS_PI_EXTENSIONS='["npm:pi-fff"]'`, `TAKT_PROVIDER_OPTIONS_PI_NO_EXTENSIONS=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_SKILLS=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_PROMPT_TEMPLATES=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_THEMES=true`, or `TAKT_PROVIDER_OPTIONS_PI_NO_CONTEXT_FILES=true`.
+Provider option leaves can also be overridden from env. For OpenCode model variants, use `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high` to set `provider_options.opencode.variant`. For provider base URLs, use `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` or `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787`; these populate the config layer and do not override step or workflow routing `base_url` leaves. For DeepSeek Harness, use `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1` for a user-controlled endpoint. The official SDK reads `DEEPSEEK_API_KEY` and optional `DEEPSEEK_BASE_URL`; TAKT passes those values only to the private Python bridge. For Codex permission control, use `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=takt` or `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=codex`. For Codex Skill inheritance, use `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO=true` or `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER=true`. For Claude Skill inheritance, use `TAKT_PROVIDER_OPTIONS_CLAUDE_SKILLS_ENABLED=true`. For Claude terminal, use `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_BACKEND=tmux`, `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TIMEOUT_MS=900000`, `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_KEEP_SESSION=false`, or `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TRANSCRIPT_POLL_INTERVAL_MS=500`. For Kiro custom agents, use `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent` to set `provider_options.kiro.agent`. For Pi thinking level, use `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL=high` to set `provider_options.pi.thinking_level`. For Pi resource loading, use `TAKT_PROVIDER_OPTIONS_PI_EXTENSIONS='["npm:pi-fff"]'`, `TAKT_PROVIDER_OPTIONS_PI_NO_EXTENSIONS=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_SKILLS=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_PROMPT_TEMPLATES=true`, `TAKT_PROVIDER_OPTIONS_PI_NO_THEMES=true`, or `TAKT_PROVIDER_OPTIONS_PI_NO_CONTEXT_FILES=true`.
 
 This allows runtime targets to mix providers and models within a single workflow while keeping display names independent from provider selection.
 

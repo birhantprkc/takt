@@ -852,6 +852,7 @@ export function denormalizeProviderOptions(
         ? { guards: { call_timeout_ms: providerOptions.pi.guards.callTimeoutMs } }
         : {}),
       ...(providerOptions.pi.extensions !== undefined ? { extensions: [...providerOptions.pi.extensions] } : {}),
+      ...(providerOptions.pi.thinkingLevel !== undefined ? { thinking_level: providerOptions.pi.thinkingLevel } : {}),
       ...(providerOptions.pi.noExtensions !== undefined ? { no_extensions: providerOptions.pi.noExtensions } : {}),
       ...(providerOptions.pi.noSkills !== undefined ? { no_skills: providerOptions.pi.noSkills } : {}),
       ...(providerOptions.pi.noPromptTemplates !== undefined

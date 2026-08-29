@@ -318,24 +318,32 @@ ignore_exceed: false          # 对 takt run 和 takt watch 应用 --ignore-exce
 
 TAKT 的 Pi provider 在当前 TAKT 进程中使用嵌入式、内存中的 Pi SDK session。它不会写 Pi session JSONL，也不会读写 Pi CLI 全局 `settings.json`。因此 Pi 全局的默认 model、thinking level、shell 和 retry 选项不会自动继承到 TAKT。
 
-需要将 Pi 设为默认值时，请在 TAKT 配置中显式指定 model。Pi model 可以带 `:<thinking-level>` 后缀：
+需要将 Pi 设为默认值时，请在 TAKT 配置中显式指定 model。model 选择和 thinking level 选择应分开配置。在旧版 `config.yaml` 模式下，推荐使用显式 option：
 
 ```yaml
 # ~/.takt/config.yaml 或 .takt/config.yaml
 provider: pi
-model: provider/model:high
+model: provider/model
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-也可以在 workflow step 上设置 model 和 thinking level：
+runtime 模式下，将 `thinking_level` 放在 Pi profile 的 `provider.profiles.<name>.options` 中。workflow YAML 不能定义 provider、model 或 provider options。
+
+Pi 的 thinking level 只能通过 `provider_options.pi.thinking_level` 或 `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL` 设置。可接受的值为 `off`、`minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`；无效值会直接失败。省略该选项时使用 Pi SDK 默认值 `medium`。model reference 只按 `/` 分割，因此 model ID 中的 `:` 会原样保留；例如 `provider/model:high` 的 model ID 是 `model:high`。显式设置的 level 会在每个 Pi turn 之前应用，包括复用 session 的 turn。
+
+如果旧配置曾使用 `model: pi/...:high` 末尾形式来指定 thinking level，请从 model reference 中删除 `:high`，改为设置以下 option：
 
 ```yaml
-steps:
-  - name: implement
-    provider: pi
-    model: provider/model:high
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-`provider` 和 `model` 声明选择 TAKT run 的 provider、model 和 thinking level；它们不会导入 Pi CLI 设置。Pi 认证由 Pi SDK credential store 或 provider 原生环境变量单独处理。`provider_options.pi` 是加载 `extensions` 和 `no_*` discovery 控制的独立路径；没有版本限定的显式 npm source 会依次复用已有的 project scope、user scope，只有两者都无法成功加载时才使用 temporary resolution；带版本的 npm source 和非 npm source 始终使用 temporary resolution。显式资源不会写入 Pi 设置。
+`provider` 和 `model` 声明选择 TAKT run 的 provider 和 model；显式 Pi option 选择 thinking level。它们不会导入 Pi CLI 设置。Pi 认证由 Pi SDK credential store 或 provider 原生环境变量单独处理。这样可以避免意外写入全局设置，并使项目本地配置保持可信且可预测。
+
+`provider_options.pi` 同时包含独立的 `thinking_level` option，以及用于加载 Pi 资源的 `extensions` 和 `no_*` discovery 控制。它不负责 authentication 或 model 选择。没有版本限定的显式 npm source 会依次复用已有的 project scope、user scope，只有两者都无法成功加载时才使用 temporary resolution；带版本的 npm source 和非 npm source 始终使用 temporary resolution。显式资源不会写入 Pi 设置。
 
 ### Provider inactivity deadline 与 OpenCode execution guard
 
@@ -493,7 +501,7 @@ kiro_cli_path: /usr/local/bin/kiro-cli
 - **Claude Code** 支持 `opus`、`sonnet`、`haiku`、`opusplan`、`default` 等别名和完整 model 名称；`model` 原样传给 provider CLI。可用 model 参见 [Claude Code 文档](https://docs.anthropic.com/en/docs/claude-code)。
 - **Codex** 通过 Codex SDK 原样使用 model 字符串；省略时默认 `codex`。
 - **OpenCode** 要求 `provider/model` 格式，例如 `opencode/big-pickle`；省略 model 会产生配置错误。
-- **Pi** 接受 `provider/model` 引用或能唯一匹配 Pi model 的裸 ID；识别到 `:<thinking-level>` 后缀时选择 Pi thinking level。
+- **Pi** 接受 `provider/model` 引用或能唯一匹配 Pi model 的裸 ID。reference 只按 `/` 分割，因此 `provider/model:high` 中的 `model:high` 是字面 model ID。thinking level 通过 `provider_options.pi.thinking_level` 或 `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL` 设置；省略时使用 Pi SDK 默认值 `medium`。显式设置的 level 会应用于每个 Pi turn。省略 model 时，TAKT 保留 Pi session 当前的 model。
 - **Cursor Agent** 将 model 原样传给 `cursor-agent --model <model>`。
 - **GitHub Copilot CLI** 将 model 原样传给 `copilot --model <model>`。
 - **Kiro CLI** 将 model 原样传给 `kiro-cli chat --model <model>`。
@@ -868,7 +876,7 @@ auto_routing:
 
 candidate 的 `routing_tier` 只能是 `high`、`medium` 或 `low`。CLI 可以用 `--auto-strategy cost|balanced|performance` 覆盖策略。路由决策默认不记录；启用 `telemetry.routing_decisions`（`takt telemetry enable` 或 `routing_decisions: true`）后，以 NDJSON 写入项目 `.takt/events/`，不会上传。
 
-provider option 也可以通过环境变量覆盖。例如 OpenCode model variant 使用 `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high`；provider base URL 可使用 `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` 或 `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787`。DeepSeek Harness 可使用 `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1`；官方 SDK 读取 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`，TAKT 只将其传给私有 Python bridge。其余 provider option 环境变量按同样的 key 路径规则解析。
+provider option 也可以通过环境变量覆盖。例如 OpenCode model variant 使用 `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high`；provider base URL 可使用 `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` 或 `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787`。Pi thinking level 使用 `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL=high` 设置 `provider_options.pi.thinking_level`。DeepSeek Harness 可使用 `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1`；官方 SDK 读取 `DEEPSEEK_API_KEY` 和可选的 `DEEPSEEK_BASE_URL`，TAKT 只将其传给私有 Python bridge。其余 provider option 环境变量按同样的 key 路径规则解析。
 
 ### Provider 专属选项
 

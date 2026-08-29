@@ -115,13 +115,18 @@ describe('compileRuntimeProviderEnvironment (profile path)', () => {
     const section: RuntimeProviderSection = {
       defaults: { profile: 'child' },
       profiles: {
-        parent: { provider: 'codex', model: 'inherited-m' },
+        parent: {
+          provider: 'pi',
+          model: 'inherited-m',
+          options: { thinking_level: 'high' },
+        },
         child: { extends: 'parent' },
       },
     };
     const env = compileRuntimeProviderEnvironment(section);
-    expect(env.provider).toBe('codex');
+    expect(env.provider).toBe('pi');
     expect(env.model).toBe('inherited-m');
+    expect(env.providerOptions).toEqual({ pi: { thinkingLevel: 'high' } });
   });
 });
 
@@ -147,6 +152,46 @@ describe('compileRuntimeProviderEnvironment (profile options)', () => {
     const env = compileRuntimeProviderEnvironment(section);
     expect(env.personaProviders).toEqual({
       coder: { provider: 'codex', model: 'persona-m', providerOptions: { codex: { reasoningEffort: 'low' } } },
+    });
+  });
+
+  it('carries Pi thinking_level through defaults and persona/tag/step routing entries', () => {
+    const section: RuntimeProviderSection = {
+      defaults: { profile: 'base' },
+      profiles: {
+        base: { provider: 'pi', model: 'base-m', options: { thinking_level: 'medium' } },
+        persona: { provider: 'pi', model: 'persona-m', options: { thinking_level: 'low' } },
+        tag: { provider: 'pi', model: 'tag-m', options: { thinking_level: 'high' } },
+        step: { provider: 'pi', model: 'step-m', options: { thinking_level: 'xhigh' } },
+      },
+      targets: {
+        personas: { coder: { profile: 'persona' } },
+        tags: { 'high-stakes': { profile: 'tag' } },
+        steps: { 'wf/impl': { profile: 'step' } },
+      },
+    };
+
+    const env = compileRuntimeProviderEnvironment(section);
+
+    expect(env.providerOptions).toEqual({ pi: { thinkingLevel: 'medium' } });
+    expect(env.personaProviders).toEqual({
+      coder: { provider: 'pi', model: 'persona-m', providerOptions: { pi: { thinkingLevel: 'low' } } },
+    });
+    expect(env.providerRouting).toEqual({
+      tags: {
+        'high-stakes': {
+          provider: 'pi',
+          model: 'tag-m',
+          providerOptions: { pi: { thinkingLevel: 'high' } },
+        },
+      },
+      steps: {
+        'wf/impl': {
+          provider: 'pi',
+          model: 'step-m',
+          providerOptions: { pi: { thinkingLevel: 'xhigh' } },
+        },
+      },
     });
   });
 

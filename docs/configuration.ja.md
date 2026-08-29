@@ -320,26 +320,32 @@ ignore_exceed: false          # takt run / takt watch で --ignore-exceed 相当
 
 TAKT の Pi provider は現在の TAKT process 内だけで使う embedded な in-memory Pi SDK session を使用します。Pi の session JSONL ファイルを書き込まず、Pi CLI のグローバル `settings.json` も読み書きしません。そのため、デフォルト model、thinking level、shell、retry option などの Pi グローバル設定は TAKT に自動継承されません。
 
-Pi のデフォルトとして使う model は TAKT の設定で明示してください。Pi の model には `:<thinking-level>` suffix を付けられます。例えば次のように設定します。
+Pi のデフォルトとして使う model は TAKT の設定で明示してください。model の選択と thinking level の選択は分けて設定します。legacy `config.yaml` モードでは、明示的な option を推奨します。
 
 ```yaml
 # ~/.takt/config.yaml または .takt/config.yaml
 provider: pi
-model: provider/model:high
+model: provider/model
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-workflow の step に model と thinking level を設定することもできます。
+runtime モードでは、Pi profile の `provider.profiles.<name>.options` に `thinking_level` を置きます。workflow YAML には provider、model、provider option を定義できません。
+
+Pi の thinking level は `provider_options.pi.thinking_level` または `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL` だけで設定します。指定できる値は `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` で、不正な値はエラーになります。省略時は Pi SDK の既定値 `medium` が使われます。model reference は `/` だけで分割されるため、model ID 内の `:` はそのまま扱われます。たとえば `provider/model:high` の model ID は `model:high` です。明示した level は、再利用した session を含むすべての Pi turn の前に適用されます。
+
+以前 `model: pi/...:high` を thinking level の指定に使っていた場合は、model reference から `:high` を削除し、代わりに次の option を設定してください。
 
 ```yaml
-steps:
-  - name: implement
-    provider: pi
-    model: provider/model:high
+provider_options:
+  pi:
+    thinking_level: high
 ```
 
-`provider` と `model` の宣言は TAKT 実行で使う provider、model、thinking level を選択するもので、Pi CLI の設定を取り込むものではありません。Pi の認証は Pi SDK credential store または provider-native 環境変数で別途処理されます。この境界により、グローバル設定への意図しない書き込みを防ぎ、プロジェクトローカル設定の信頼性と予測可能性を保ちます。
+`provider` と `model` の宣言は TAKT 実行で使う provider と model を選択し、明示的な Pi option が thinking level を選択します。Pi CLI の設定は取り込みません。Pi の認証は Pi SDK credential store または provider-native 環境変数で別途処理されます。この境界により、グローバル設定への意図しない書き込みを防ぎ、プロジェクトローカル設定の信頼性と予測可能性を保ちます。
 
-`provider_options.pi` は、`extensions` や `no_*` の探索制御など、Pi リソースを読み込むための別経路です。これらの option は認証、model、thinking level を宣言するものではありません。version 指定のない明示 npm source は既存の project scope、user scope を順に再利用し、どちらも正常に読み込めない場合だけ temporary resolution に fallback します。version 指定付き npm source と npm 以外の source は常に temporary resolution されます。明示した source は Pi settings には永続化されません。リソースの信頼境界については [Pi のリソース読み込み](#pi-resource-loading) を参照してください。
+`provider_options.pi` には、独立した `thinking_level` option と、`extensions` や `no_*` の探索制御など Pi リソースを読み込むための設定が含まれます。認証や model 選択は設定しません。version 指定のない明示 npm source は既存の project scope、user scope を順に再利用し、どちらも正常に読み込めない場合だけ temporary resolution に fallback します。version 指定付き npm source と npm 以外の source は常に temporary resolution されます。明示した source は Pi settings には永続化されません。リソースの信頼境界については [Pi のリソース読み込み](#pi-resource-loading) を参照してください。
 
 ### プロバイダ無応答 deadline と OpenCode 実行ガード
 
@@ -558,7 +564,7 @@ workflow の `promotion` entry は `runtime.yaml` で選択された target ladd
 
 **OpenCode** は `provider/model` 形式のモデル（例: `opencode/big-pickle`）が必要です。OpenCode provider でモデルを省略すると設定エラーになります。
 
-**Pi** は `provider/model` 形式と、設定済みの Pi model に一意に一致する model ID を受け付けます。認識可能な `:<thinking-level>` サフィックスで Pi の thinking level を指定できます。省略時は Pi session の現在の model を維持します。
+**Pi** は `provider/model` 形式と、設定済みの Pi model に一意に一致する model ID を受け付けます。reference は `/` だけで分割されるため、`provider/model:high` の `model:high` はリテラルの model ID です。thinking level は `provider_options.pi.thinking_level` または `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL` で設定し、省略時は Pi SDK の既定値 `medium` を使います。明示した level はすべての Pi turn に適用されます。model を省略した場合は Pi session の現在の model を維持します。
 
 **Cursor Agent** は `model` を `cursor-agent --model <model>` にそのまま渡します。省略時は Cursor CLI のデフォルトが使用されます。
 
@@ -1151,7 +1157,7 @@ capability の参照は共有 YAML provider-options preset を名前で読み込
 
 capability preset の解決は、preset または path を解決できない場合、scoped ref が利用可能な repertoire package を指していない場合、参照先 YAML が不正または provider-options object でない場合、extends チェーンが循環している場合、削除済みの `$ref` キーが使われた場合に、設定エラーとして fail fast します。相対 path は workflow file 基準で解決され、symlink 解決後も workflow directory 内に留まる必要があります。絶対 path と、実体が workflow directory 外へ出る path は拒否されます。
 
-provider option の leaf は環境変数でも上書きできます。OpenCode の model variant は `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high` で `provider_options.opencode.variant` を設定できます。provider base URL は `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` または `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787` を使用できます。DeepSeek Harness は `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1` を使用できます。これらは config layer を設定するもので、step や workflow routing の `base_url` leaf は上書きしません。Codex の permission control は `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=takt` または `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=codex` で設定できます。Codex Skill の継承は `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO=true` または `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER=true` で設定できます。Claude Skill の継承は `TAKT_PROVIDER_OPTIONS_CLAUDE_SKILLS_ENABLED=true` で設定できます。Claude terminal は `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_BACKEND=tmux`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TIMEOUT_MS=900000`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_KEEP_SESSION=false`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TRANSCRIPT_POLL_INTERVAL_MS=500` を使用できます。Kiro の custom agent は `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent` で `provider_options.kiro.agent` を設定できます。Pi の resource loading は `TAKT_PROVIDER_OPTIONS_PI_EXTENSIONS='["npm:pi-fff"]'`、`TAKT_PROVIDER_OPTIONS_PI_NO_EXTENSIONS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_SKILLS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_PROMPT_TEMPLATES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_THEMES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_CONTEXT_FILES=true` を使用できます。
+provider option の leaf は環境変数でも上書きできます。OpenCode の model variant は `TAKT_PROVIDER_OPTIONS_OPENCODE_VARIANT=high` で `provider_options.opencode.variant` を設定できます。provider base URL は `TAKT_PROVIDER_OPTIONS_CODEX_BASE_URL=http://127.0.0.1:8787/v1` または `TAKT_PROVIDER_OPTIONS_CLAUDE_BASE_URL=http://127.0.0.1:8787` を使用できます。DeepSeek Harness は `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_BASE_URL=http://127.0.0.1:8787/v1` を使用できます。これらは config layer を設定するもので、step や workflow routing の `base_url` leaf は上書きしません。Codex の permission control は `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=takt` または `TAKT_PROVIDER_OPTIONS_CODEX_PERMISSION_CONTROL=codex` で設定できます。Codex Skill の継承は `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_REPO=true` または `TAKT_PROVIDER_OPTIONS_CODEX_SKILLS_USER=true` で設定できます。Claude Skill の継承は `TAKT_PROVIDER_OPTIONS_CLAUDE_SKILLS_ENABLED=true` で設定できます。Claude terminal は `TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_BACKEND=tmux`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TIMEOUT_MS=900000`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_KEEP_SESSION=false`、`TAKT_PROVIDER_OPTIONS_CLAUDE_TERMINAL_TRANSCRIPT_POLL_INTERVAL_MS=500` を使用できます。Kiro の custom agent は `TAKT_PROVIDER_OPTIONS_KIRO_AGENT=planner-agent` で `provider_options.kiro.agent` を設定できます。Pi の thinking level は `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL=high` で `provider_options.pi.thinking_level` に設定できます。Pi の resource loading は `TAKT_PROVIDER_OPTIONS_PI_EXTENSIONS='["npm:pi-fff"]'`、`TAKT_PROVIDER_OPTIONS_PI_NO_EXTENSIONS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_SKILLS=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_PROMPT_TEMPLATES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_THEMES=true`、`TAKT_PROVIDER_OPTIONS_PI_NO_CONTEXT_FILES=true` を使用できます。
 
 これにより、表示名と provider 選択を分離したまま、runtime target が単一の workflow 内で provider や model を混在させることができます。
 

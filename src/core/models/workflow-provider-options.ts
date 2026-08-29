@@ -144,13 +144,14 @@ export interface DeepSeekHarnessProviderOptions {
 }
 
 /**
- * Pi SDK resource-loading options. Bare npm sources try existing project and user
+ * Pi SDK execution and resource-loading options. Bare npm sources try existing project and user
  * installs before temporary resolution; version-qualified npm and non-npm sources
  * are always temporary and explicit sources are never persisted to Pi settings.
  */
 export interface PiProviderOptions {
   guards?: ProviderGuardOptions;
   extensions?: string[];
+  thinkingLevel?: string;
   noExtensions?: boolean;
   noSkills?: boolean;
   noPromptTemplates?: boolean;
