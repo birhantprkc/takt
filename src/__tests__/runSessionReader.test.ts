@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import {
   OTEL_SESSION_SHADOW_LOG_FILE_SUFFIX,
   PHASE_USAGE_EVENTS_LOG_FILE_SUFFIX,
+  PROMPT_LOG_FILE_SUFFIX,
   PROVIDER_EVENTS_LOG_FILE_SUFFIX,
   USAGE_EVENTS_LOG_FILE_SUFFIX,
 } from '../core/logging/contracts.js';
@@ -21,9 +22,13 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    /**
+     * Reverse only the targeted directory's entries to exercise order-independent log selection.
+     */
     readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
       const entries = actual.readdirSync(...args);
-      return String(args[0]) === fsControl.reverseLogDirectory && args.length === 1
+      const argumentCount = (args as readonly unknown[]).length;
+      return String(args[0]) === fsControl.reverseLogDirectory && argumentCount === 1
         ? [...entries].reverse()
         : entries;
     }) as typeof actual.readdirSync,
@@ -113,8 +118,8 @@ describe('listRecentRuns', () => {
 
     const result = listRecentRuns(tmpDir);
     expect(result).toHaveLength(2);
-    expect(result[0].slug).toBe('run-new');
-    expect(result[1].slug).toBe('run-old');
+    expect(result[0]!.slug).toBe('run-new');
+    expect(result[1]!.slug).toBe('run-old');
   });
 
   it('should limit results to 10', () => {
@@ -295,10 +300,10 @@ describe('loadRunSessionContext', () => {
     expect(context.workflow).toBe('default');
     expect(context.status).toBe('completed');
     expect(context.stepLogs).toHaveLength(1);
-    expect(context.stepLogs[0].step).toBe('implement');
-    expect(context.stepLogs[0].content).toBe('Implementation done');
-    expect(context.stepLogs[0].workflow).toBe('default');
-    expect(context.stepLogs[0].stack).toEqual([
+    expect(context.stepLogs[0]!.step).toBe('implement');
+    expect(context.stepLogs[0]!.content).toBe('Implementation done');
+    expect(context.stepLogs[0]!.workflow).toBe('default');
+    expect(context.stepLogs[0]!.stack).toEqual([
       {
         workflow: 'default',
         workflow_ref: 'default',
@@ -308,7 +313,7 @@ describe('loadRunSessionContext', () => {
       },
     ]);
     expect(context.reports).toHaveLength(1);
-    expect(context.reports[0].filename).toBe('00-plan.md');
+    expect(context.reports[0]!.filename).toBe('00-plan.md');
   });
 
   it('should load nested subworkflow reports with relative paths', () => {
@@ -602,8 +607,8 @@ describe('loadRunSessionContext', () => {
 
     const context = loadRunSessionContext(tmpDir, slug);
 
-    expect(context.stepLogs[0].content.length).toBe(501); // 500 + '…'
-    expect(context.stepLogs[0].content.endsWith('…')).toBe(true);
+    expect(context.stepLogs[0]!.content.length).toBe(501); // 500 + '…'
+    expect(context.stepLogs[0]!.content.endsWith('…')).toBe(true);
   });
 
   it('should handle missing log files gracefully', () => {
@@ -663,7 +668,7 @@ describe('loadRunSessionContext', () => {
     expect(context.stepLogs).toEqual([]);
   });
 
-  it('should load the session log when provider, usage, phase usage, and OTEL shadow logs coexist', () => {
+  it('should load the session log when all sidecar logs coexist', () => {
     const slug = 'mixed-log-run';
     const runDir = createRunDir(tmpDir, slug, {
       task: 'Mixed log test',
@@ -686,6 +691,7 @@ describe('loadRunSessionContext', () => {
       `${sessionId}${PHASE_USAGE_EVENTS_LOG_FILE_SUFFIX}`,
       `${sessionId}${PROVIDER_EVENTS_LOG_FILE_SUFFIX}`,
       `${sessionId}${USAGE_EVENTS_LOG_FILE_SUFFIX}`,
+      `${sessionId}${PROMPT_LOG_FILE_SUFFIX}`,
       sessionLogName,
     ]) {
       writeFileSync(join(runDir, 'logs', filename), '{}', 'utf-8');
