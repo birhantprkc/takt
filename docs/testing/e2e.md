@@ -24,7 +24,7 @@ E2Eテストを追加・変更した場合は、このドキュメントも更�
 - `~/.takt/config.yaml` はE2Eでは参照されないため、通常実行の設定には影響しない。
 
 ## 実行コマンド
-- `npm run test:e2e:smoke`: 対象を絞ったローカル確認向けの高速な mock E2E smoke を実行。
+- `npm run test:e2e:smoke`: 対象を絞ったローカル確認向けの高速な mock E2E smoke を実行。provider はVitest設定内で `mock` を既定化するため、POSIX shell・PowerShellのどちらからも追加の環境変数構文なしで実行できる。
 - `npm run test:e2e`: `test:e2e:mock` のラッパー。GitHub接続エラー検出とmacOS通知も行う。
 - `npm run test:e2e:mock`: mock固定のフルE2Eを複数シャードで並列実行。
 - `npm run test:e2e:mock:serial`: mock固定のフルE2Eを従来どおり単一Vitestプロセスで実行。
