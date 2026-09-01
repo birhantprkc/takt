@@ -6,6 +6,32 @@
 
 フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に基づいています。
 
+## [0.64.0] - 2026-09-01
+
+### Added
+
+- `takt make` が対話型 Workflow Maker を起動します (#1507)。TTY 専用で、会話の前に New workflow、または project / global / builtin / repertoire のワークフローを読み取り専用のベースとして選びます。選択したソースが編集されることはありません。会話中は `/workflow` でベースを差し替え、`/go` で完全な実装指示を準備します。承認画面には作成先の `.takt/make/<timestamp>/` パスが表示され、Execute・Continue editing・Cancel だけを提示します。承認された実行は静的に到達可能な依存クロージャを独立ディレクトリ（`workflows/`、`steps/`、`facet-pools/`、`facets/`）へコピーし、参照をコピー先へ書き換えたうえで、そのディレクトリを作業ディレクトリとして builtin の `workflow-maker` ワークフローを直接実行します。タスク・worktree・コミット・push・プルリクエストは作成しません。動的または未解決の依存は実行前に失敗し、完了・失敗した実行は表示されたパスにそのまま残ります。
+- グローバル設定とプロジェクト設定のパス衝突を起動時に検出します (#1505)。グローバル設定ディレクトリ（`TAKT_CONFIG_DIR` または `~/.takt`）とプロジェクトの `.takt` が同一の実体パスに解決される場合 — ホームディレクトリでの実行やシンボリックリンク経由 — 、CLI はプロジェクト初期化の前に、両方のパス・原因・対処を示すエラーで終了します。グローバル設定がプロジェクト設定として誤読されることはなくなりました。
+- DeepSeek Harness が route 付き model 参照をサポートします (#1485)。`model` フィールドは `openai/gpt-5.4` や `my-gateway/org/custom-model` のような `<route>/<model>` 形式を受け付けます。最初の `/` より前が provider route となり、残りは opaque な model ID としてそのまま公式 SDK へ渡されます（2つ目以降の `/` や `:` は保持されます）。route なしの model は後方互換の `deepseek-official` route を使います。`/gpt-5.4`、`openai/`、空値のような不正な参照はブリッジ起動前に拒否されます。TAKT は route の allowlist を持たず、未知の route や model ID の検証は SDK に委ねます。
+
+### Changed
+
+- **BREAKING:** Pi の thinking level は model 参照のサフィックスではなく `provider_options.pi.thinking_level` で設定します (#1493)。受け付ける値は `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`（環境変数 `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL` で上書き可能）で、不正な値は失敗し、未設定時は Pi SDK のデフォルト `medium` が使われます。設定された level は再利用セッションのターンを含む毎ターンの前に適用されます。Pi の model 参照は `/` でのみ分割されるようになり、model ID 中の `:` はリテラルです。`model: provider/model:high` は thinking level を選択せず、`model:high` を model ID として送信します。サフィックスを削除し、代わりに `provider_options.pi.thinking_level` を設定してください。
+- Companion の指摘修正はデフォルトで advisory な1ターンのみ実行します (#1503)。新設の `companion.fix_policy` は `single`（デフォルト）と `loop` を受け付けます。`single` ではレビューを1回実行し、accept された指摘を参考情報として同じ実装セッションへ渡して修正ターンを1回だけ実行し（対応の要否は実装側が判断）、再レビューせずに終了します。accept された指摘が0件なら修正ターンも実行しません。従来のレビュー→修正→再レビューのループは `fix_policy: loop` として残り、新たに accept される指摘がなくなったラウンドで終了します。設定はグローバル粒度のみで、`completion` / `live` 両方の review mode に適用され、project 値が global 値を上書きします。
+- Codex への権限委譲時に `network_access` を無視します (#1504)。`provider_options.codex.permission_control: codex` のとき、解決された `network_access` 値は警告なしに受理され、Codex の権限フィールドに対しては出所を問わず無視されます。従来はこの組み合わせで fail fast していました。`reasoning_effort`、`fast_mode`、`skills` のような権限以外のオプションは引き続き適用されます。
+- ビルトインの fix-plan プロンプトが、実装前に独立した修復パスを閉じます (#1519)。受け入れ基準が対象とする各結果について、単独で結果を変え得る入力・状態を列挙し、各パスを実際のエントリから観測可能な結果まで辿り、パスごとに成功例1つと違反を検出する反例1つを記録します。fix-plan レポートには Impact Paths テーブルが加わり、検証できないパスが残る間は計画を確定しません。
+- ビルトインの ai-antipattern policy が、契約根拠のない文言固定テストを検出します (#1525)。宣言された機械可読な契約根拠なしに人間向け文言を完全一致で固定するテストを AI アンチパターンとして報告します（正本は testing policy）。宣言された契約トークンへのアサーションは検出対象になりません。
+- Ink TUI が起動時に過去 run の結果を通知しなくなりました (#1509)。別ターミナルで完了した `takt run` など、以前の実行が保存した結果は TUI 起動時に黙って破棄されます。プレーンリーダーは従来どおり1回表示し、TUI セッション自身が開始したワークフローの完了通知は引き続き行われます。
+- Web UI（experimental）の実行グラフを永続化された証跡から描画します (#1517)。observed participant / observed boundary のラベルはライフサイクルレコード由来で、`PREV` / `NEXT` はステップや境界のポートを示し、並列呼び出しは境界のポートを通る1つの fork と1つの join として描画されます。イベントの記録順で参加者同士が連結されることはありません。
+
+### Fixed
+
+- Retry が `-prompts.jsonl` をセッションログとして誤選択しなくなりました (#1516)。セッションログの探索が per-run のサイドカーログ（prompts、provider events、usage events、OTLP shadow）を除外するようになり、per-run のプロンプト/レスポンスデバッグログが存在する状態でも、retry がデバッグファイルで失敗せずタスクを再実行します。
+
+### Internal
+
+- E2E スモークテスト、eject rollback テスト、operation-journal store テストを Windows で動作するようにし (#1510)、DeepSeek Harness クライアントテストのプラットフォーム判定と Python 判定を分離しました (#1528)。
+
 ## [0.63.0] - 2026-08-27
 
 ### Added

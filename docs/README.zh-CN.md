@@ -268,6 +268,7 @@ steps:
 |------|------|
 | `takt` | 与 AI 对话、完善需求、执行或排队任务 |
 | `takt exec` | 启动即时 Assistant/Worker/Review agent 模式，无需写 workflow YAML |
+| `takt make` | 启动 Workflow Maker，通过对话创建或修改独立的 workflow bundle |
 | `takt add` | 通过 AI 对话完善任务并加入队列，也可从 GitHub Issue 创建 |
 | `takt run` | 执行所有待处理任务 |
 | `takt watch` | 监视任务队列并自动执行待处理任务 |
