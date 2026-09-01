@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.64.0] - 2026-09-01
+
+### Added
+
+- `takt make` starts the interactive Workflow Maker (#1507). TTY-only: before the conversation, choose New workflow or a project, global, builtin, or repertoire workflow as a read-only base — the selected source is never edited. `/workflow` replaces the base during the conversation and `/go` prepares a complete implementation instruction; the approval screen shows the planned `.takt/make/<timestamp>/` path and offers Execute, Continue editing, and Cancel. An approved run copies the statically reachable dependency closure into that isolated directory (`workflows/`, `steps/`, `facet-pools/`, `facets/`), rewrites references to the copies, and runs the builtin `workflow-maker` workflow with the directory as its working directory. It creates no task, worktree, commit, push, or pull request; dynamic or unresolved dependencies fail before execution, and completed and failed runs remain at their displayed paths.
+- Startup guard against global/project config path collisions (#1505). When the global config directory (`TAKT_CONFIG_DIR` or `~/.takt`) and the project's `.takt` resolve to the same real path — running in the home directory, or via symlinks — the CLI exits before project initialization with an error naming both paths, the cause, and the fix, instead of silently reading global configuration as project configuration.
+- DeepSeek Harness routed model references (#1485). The `model` field accepts `<route>/<model>` such as `openai/gpt-5.4` or `my-gateway/org/custom-model`: the text before the first `/` selects the provider route and the rest is passed to the official SDK as an opaque model ID (later `/` and any `:` are preserved). A bare model keeps the backward-compatible `deepseek-official` route. Malformed references such as `/gpt-5.4`, `openai/`, or an empty value are rejected before the bridge starts; TAKT applies no route allowlist and leaves unknown routes and model IDs to the SDK.
+
+### Changed
+
+- **BREAKING:** The Pi thinking level is configured with `provider_options.pi.thinking_level` instead of a model-reference suffix (#1493). Accepted values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` (environment override `TAKT_PROVIDER_OPTIONS_PI_THINKING_LEVEL`); an invalid value fails, and when omitted the Pi SDK default `medium` applies. A configured level is applied before every Pi turn, including turns in a reused session. Pi model references are now split only at `/`, so a `:` in the model ID is literal: `model: provider/model:high` no longer selects a thinking level and instead sends `model:high` as the model ID. Remove the suffix and set `provider_options.pi.thinking_level` instead.
+- Companion follow-up fixes default to a single advisory turn (#1503). The new `companion.fix_policy` accepts `single` (default) and `loop`. With `single`, the review runs once; accepted findings are handed to the same implementer session as advisory input for one fix turn — the implementer decides what to address — and the step finishes without a re-review (no accepted findings means no fix turn). The previous review→fix→re-review loop remains available as `fix_policy: loop`, terminating when a round accepts no new findings. The policy is global-config only, applies to both `completion` and `live` review modes, and the project value overrides the global value.
+- Codex ignores `network_access` when permission control is delegated (#1504). With `provider_options.codex.permission_control: codex`, a resolved `network_access` value is now accepted without a warning and ignored for the Codex permission fields, whatever its source — previously the combination failed fast. Non-permission options such as `reasoning_effort`, `fast_mode`, and `skills` continue to apply.
+- Builtin fix-plan prompts close independent repair paths before implementation (#1519). For each result covered by the acceptance criteria, the plan lists every input or state that can change it on its own, traces each such path from a real entry point to the observable result, and records one successful example and one counterexample per path; the fix-plan report gains an Impact Paths table, and the plan is not finalized while any path cannot be checked.
+- The builtin ai-antipattern policy flags wording-fixed tests without contract grounds (#1525). Tests that pin human-readable wording by exact match without declared machine-readable contract grounds are reported as an AI antipattern, with the testing policy as the source of truth; assertions on declared contract tokens are not flagged.
+- The Ink TUI no longer announces a previous run's result at startup (#1509). A result saved by an earlier run — for example a `takt run` that finished in another terminal — is discarded silently when the TUI starts; the plain reader still prints it once, and workflows started from the TUI session itself are still announced when they finish.
+- The Web UI (experimental) execution graph is drawn from persisted evidence (#1517). Observed-participant and observed-boundary labels come from lifecycle records, `PREV`/`NEXT` name a step or boundary's ports, and a parallel invocation is drawn as one fork and one join through the boundary's ports instead of chaining participants in event order.
+
+### Fixed
+
+- Retry no longer misreads `-prompts.jsonl` as the session log (#1516). Session-log discovery now excludes the per-run sidecar logs (prompts, provider events, usage events, OTLP shadow), so a task retried while per-run prompt/response debug logs exist re-runs instead of failing on the debug file.
+
+### Internal
+
+- E2E smoke tests, the eject rollback test, and the operation-journal store test are portable on Windows (#1510), and the DeepSeek Harness client tests separate platform support from Python availability (#1528).
+
 ## [0.63.0] - 2026-08-27
 
 ### Added
