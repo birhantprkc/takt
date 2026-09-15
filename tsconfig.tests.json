@@ -53,6 +53,7 @@
     "src/__tests__/deepseek-harness-live-smoke.test.ts",
     "src/__tests__/deepseek-harness-managed-venv.integration.test.ts",
     "src/__tests__/deepseek-harness-provider.test.ts",
+    "src/__tests__/development-loop-routing.integration.test.ts",
     "src/__tests__/e2e-terminal-output.test.ts",
     "src/__tests__/engine-capabilities-provider-options.test.ts",
     "src/__tests__/engine-team-leader.test.ts",
