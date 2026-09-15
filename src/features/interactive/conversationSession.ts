@@ -61,7 +61,7 @@ export interface ConversationSessionStrategy {
   enabledCommands?: readonly SlashCommand[];
   /** Task/action content supplied to the first `/verify` generation call. */
   formalSpecInitialContext?: string;
-  /** Enable the normal-assistant-only `/tell` command. */
+  /** Enable the `/tell` command. */
   enableTellCommand?: boolean;
   /** Run to use as the initial `/tell` choice. */
   initialReferenceRunSlug?: string;

@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AssistantInteractiveMode, PermissionMode } from '../core/models/index.js';
 import { SlashCommand } from '../shared/constants.js';
+import { filterSlashCommands } from '../features/interactive/slashCommandRegistry.js';
 import type { StreamCallback } from '../shared/types/provider.js';
 import type { WorkflowContext } from '../features/interactive/interactive-summary-types.js';
 
@@ -56,6 +57,7 @@ vi.mock('../features/interactive/taskInstructionFormat.js', async (importOrigina
 
 import {
   createAssistantConversationPlan,
+  createPersonaConversationPlan,
   type ConversationPlan,
 } from '../features/interactive/conversationPlan.js';
 import { createInstructConversationPlan } from '../features/interactive/taskActionConversationPlan.js';
@@ -130,6 +132,17 @@ function createConversation(overrides?: Partial<TuiConversationOptions>): TuiCon
     enableSettingsCommands: true,
     ...overrides,
   });
+}
+
+function createConversationForMode(mode: 'assistant' | 'grill-me' | 'persona'): TuiConversation {
+  const plan = mode === 'persona'
+    ? createPersonaConversationPlan('/repo', {
+      personaContent: 'You are the reviewer.',
+      personaDisplayName: 'Reviewer',
+      allowedTools: ['Read'],
+    })
+    : createPlan(mode);
+  return createConversation({ plan });
 }
 
 function send(
@@ -488,6 +501,26 @@ describe('notices from a turn the user left behind', () => {
 });
 
 describe('TUI local commands', () => {
+  it.each(['assistant', 'grill-me', 'persona'] as const)(
+    'should expose and recognize /tell in %s mode',
+    (mode) => {
+      const conversation = createConversationForMode(mode);
+      const input = '/tell continue the selected task';
+
+      expect(conversation.commandAvailability.enableTellCommand).toBe(true);
+      expect(filterSlashCommands('/tell', conversation.commandAvailability)).toEqual([{
+        command: SlashCommand.Tell,
+        labelKey: 'interactive.commands.tell',
+      }]);
+      expect(conversation.isCommandLine(input)).toBe(true);
+      expect(conversation.resolveLocalCommand(input)).toEqual({
+        kind: 'handoff',
+        id: 'tell',
+        text: 'continue the selected task',
+      });
+    },
+  );
+
   it('should resolve /cancel and /tell locally and defer /go and plain text to the session', () => {
     const conversation = createConversation();
 
