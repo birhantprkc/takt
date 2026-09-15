@@ -12,6 +12,20 @@ import { providerDefaultAllowedToolsWithoutEdit } from '../infra/providers/provi
 import { resolvePiActiveTools } from '../infra/providers/pi-tool-policy.js';
 
 describe('allowed-tool-edit-policy', () => {
+  it('keeps an ordinary allowlist authoritative when Pi permission mode is unset', () => {
+    const tools = [
+      { name: 'read', source: 'builtin' },
+      { name: 'extension_write', source: 'extension', sourcePath: '/trusted.ts' },
+    ];
+    expect(resolvePiActiveTools(undefined, ['read'], tools, ['/trusted.ts'])).toEqual(['read']);
+    expect(resolvePiActiveTools(undefined, ['extension_write'], tools, ['/trusted.ts']))
+      .toEqual(['extension_write']);
+    for (const mode of ['readonly', 'edit'] as const) {
+      expect(resolvePiActiveTools(mode, ['read'], tools, ['/trusted.ts']))
+        .toEqual(['read', 'extension_write']);
+    }
+  });
+
   it('should export Claude edit tool names for provider policy checks', () => {
     expect(CLAUDE_EDIT_TOOL_NAMES).toEqual(new Set([
       'edit',

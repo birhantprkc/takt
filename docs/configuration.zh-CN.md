@@ -1034,6 +1034,10 @@ provider_options:
 
 没有版本限定的显式 npm source 会依次复用已有的 project scope、user scope 安装；两者都无法解析为启用的资源时，才使用 temporary resolution，并且不会向持久 scope 安装。带版本限定的 npm source 始终使用 temporary resolution。显式资源不会写入 Pi 设置；隐式 project-local Pi 资源不会被信任或加载，只有为显式 npm source 检测到的绝对路径可以从 project package storage 复用。带有内嵌凭据或包含 secret 的 query 参数的 extension URL 会被拒绝。
 
+在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的所有 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 仍然只过滤 builtin tool，而 `allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
+
+未指定 permission mode 时，显式 `allowedTools` 列表仍决定允许范围；配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
+
 <a id="workflow-categories"></a>
 
 ## Workflow 分类

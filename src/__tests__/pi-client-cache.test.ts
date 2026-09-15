@@ -37,6 +37,27 @@ const mocks = vi.hoisted(() => {
   const states: SessionState[] = [];
   const events: string[] = [];
   const started = new Set<string>();
+  let loadedExtensions: Array<{ path: string }> = [];
+
+  function extensionsFromLoaderOptions(options: unknown): Array<{ path: string }> {
+    const paths = (options as { additionalExtensionPaths?: unknown }).additionalExtensionPaths;
+    if (!Array.isArray(paths)) {
+      return [];
+    }
+    return paths
+      .filter((extensionPath): extensionPath is string => typeof extensionPath === 'string')
+      .map((extensionPath) => ({
+        path: extensionPath,
+        resolvedPath: extensionPath,
+        sourceInfo: {
+          path: extensionPath,
+          source: extensionPath,
+          scope: 'temporary' as const,
+          origin: 'top-level' as const,
+        },
+        tools: new Map(),
+      }));
+  }
 
   const createAgentSession = vi.fn(async (options: {
     sessionManager: { requestedId?: string };
@@ -72,13 +93,13 @@ const mocks = vi.hoisted(() => {
         state.thinkingLevels.push(level);
       }),
       getAllTools: vi.fn(() => [
-        { name: 'read', sourceInfo: { source: 'builtin' } },
-        { name: 'grep', sourceInfo: { source: 'builtin' } },
-        { name: 'find', sourceInfo: { source: 'builtin' } },
-        { name: 'ls', sourceInfo: { source: 'builtin' } },
-        { name: 'edit', sourceInfo: { source: 'builtin' } },
-        { name: 'write', sourceInfo: { source: 'builtin' } },
-        { name: 'bash', sourceInfo: { source: 'sdk' } },
+        { name: 'read', sourceInfo: { path: '<builtin:read>', source: 'builtin' } },
+        { name: 'grep', sourceInfo: { path: '<builtin:grep>', source: 'builtin' } },
+        { name: 'find', sourceInfo: { path: '<builtin:find>', source: 'builtin' } },
+        { name: 'ls', sourceInfo: { path: '<builtin:ls>', source: 'builtin' } },
+        { name: 'edit', sourceInfo: { path: '<builtin:edit>', source: 'builtin' } },
+        { name: 'write', sourceInfo: { path: '<builtin:write>', source: 'builtin' } },
+        { name: 'bash', sourceInfo: { path: '<sdk:bash>', source: 'sdk' } },
       ]),
       bindExtensions: vi.fn(async () => undefined),
       dispose: vi.fn(() => {
@@ -130,7 +151,7 @@ const mocks = vi.hoisted(() => {
     return {
       session,
       extensionsResult: {
-        extensions: [],
+        extensions: loadedExtensions,
         errors: [],
         runtime: {
           pendingProviderRegistrations: [],
@@ -146,6 +167,7 @@ const mocks = vi.hoisted(() => {
       states.length = 0;
       events.length = 0;
       started.clear();
+      loadedExtensions = [];
     },
     createAgentSession,
     modelRuntimeCreate: vi.fn(async () => ({
@@ -154,19 +176,27 @@ const mocks = vi.hoisted(() => {
       registerProvider: vi.fn(),
       registerNativeProvider: vi.fn(),
     })),
-    resourceLoader: vi.fn(() => ({
-      reload: vi.fn(async () => undefined),
-      getExtensions: vi.fn(() => ({
-        extensions: [],
-        errors: [],
-        runtime: {
-          pendingProviderRegistrations: [],
-          pendingNativeProviderRegistrations: [],
-        },
-      })),
-    })),
+    resourceLoader: vi.fn((options: unknown) => {
+      loadedExtensions = extensionsFromLoaderOptions(options);
+      return {
+        reload: vi.fn(async () => undefined),
+        getExtensions: vi.fn(() => ({
+          extensions: loadedExtensions,
+          errors: [],
+          runtime: {
+            pendingProviderRegistrations: [],
+            pendingNativeProviderRegistrations: [],
+          },
+        })),
+      };
+    }),
     packageManagerConstructor: vi.fn(() => ({
-      resolveExtensionSources: vi.fn(async () => ({ extensions: [], skills: [], prompts: [], themes: [] })),
+      resolveExtensionSources: vi.fn(async (sources: readonly string[]) => ({
+        extensions: sources.map((source) => ({ enabled: true, path: source })),
+        skills: [],
+        prompts: [],
+        themes: [],
+      })),
     })),
     sessionManager: {
       inMemory: vi.fn((_cwd: string, options?: { id?: string }) => ({ requestedId: options?.id })),
@@ -349,6 +379,36 @@ describe('Pi SDK session cache', () => {
     expect(firstState).not.toBe(secondState);
     expect(firstState.promptThinkingLevels).toEqual(['low']);
     expect(secondState.promptThinkingLevels).toEqual(['high']);
+  });
+
+  it('does not reuse a cached session across extension configurations', async () => {
+    const sessionId = 'extension-configuration-cache';
+    const first = callPi('worker', 'use the first extension', {
+      ...options(sessionId),
+      providerOptions: { extensions: ['./first-extension.ts'] },
+    });
+
+    await vi.waitFor(() => expect(mocks.started.size).toBe(1));
+    const firstState = mocks.latestState(sessionId)!;
+    mocks.releaseLatest(sessionId);
+    expect((await first).status).toBe('done');
+
+    const second = callPi('worker', 'use the second extension', {
+      ...options(sessionId),
+      providerOptions: { extensions: ['./second-extension.ts'] },
+    });
+
+    await vi.waitFor(() => expect(
+      mocks.states.filter((state) => state.requestedId === sessionId),
+    ).toHaveLength(2));
+    const secondState = mocks.latestState(sessionId)!;
+    mocks.releaseLatest(sessionId);
+
+    expect((await second).status).toBe('done');
+    expect(mocks.createAgentSession).toHaveBeenCalledTimes(2);
+    expect(secondState).not.toBe(firstState);
+    expect(firstState.disposed).toBe(true);
+    expect(secondState.disposed).toBe(false);
   });
 
   it('keeps a literal colon-containing model ID when a session is reused', async () => {

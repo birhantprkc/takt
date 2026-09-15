@@ -1384,6 +1384,9 @@ provider_options:
 - `no_extensions` は extension 探索を無効にしますが、`extensions` に列挙した source は読み込みます。
 - その他の `no_*` オプションは、それぞれ対応するリソース種別の探索を無効にします。
 - 暗黙の project-local Pi resource は信頼せず、読み込みません。project package storage から再利用するのは、明示した npm source に対して検出した絶対 path だけです。
+- `readonly` と `edit` では、明示的に設定した各 extension に登録された全 tool を1つの trust unit としてまとめて有効化します。ambient に自動探索された extension tool は、これらの restrictive mode では有効化しません。`allowedTools` が非空の場合も builtin tool の filtering は維持し、`allowedTools: []` は明示 extension tool を含むすべての tool を拒否します。
+- permission mode 未指定時は、明示した `allowedTools` の許可範囲を維持します。extension を設定しても未指定の tool は追加しません。skills・prompts・themes のみを含む package も、extension tool を許可せず従来どおり読み込みます。
+- Pi の permission mode は active-tool allowlist であり、OS sandbox ではありません。信頼した明示 extension は `permission_mode: readonly` でも process を実行したり file を変更したりできます。明示 extension の読み込み失敗や provenance 検証失敗は、Pi call を error で停止します。
 - 明示した extension は TAKT process 内で実行されるため、信頼できる local path と package source だけを設定してください。
 - 認証情報を埋め込んだ URL や secret 系 query parameter を含む extension URL は拒否します。
 

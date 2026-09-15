@@ -71,6 +71,8 @@ interface PiSessionRecord {
   runtime: ModelRuntime;
   cwd: string;
   configurationFingerprint: string;
+  setPiToolPolicyOptions: (options: PiCallOptions) => void;
+  assertPiToolPolicyHealthy: () => void;
   thinkingLevelOverrideActive: boolean;
   extensionErrors: string[];
   operationTail: Promise<void>;
@@ -89,6 +91,13 @@ interface PiSessionCreation {
   record?: PiSessionRecord;
   handoffLeaseHeld: boolean;
 }
+
+interface PiResourceLoaderResolution {
+  resourceLoader: DefaultResourceLoader;
+  explicitExtensionPaths: readonly string[];
+}
+
+type PiAgentToolInfo = ReturnType<AgentSession['getAllTools']>[number];
 
 const sessions = new Map<string, PiSessionRecord>();
 const sessionCreations = new Map<string, PiSessionCreation>();
@@ -246,24 +255,131 @@ function assertSafeExtensionSources(sources: readonly string[]): void {
   }
 }
 
-function applyPiTools(session: AgentSession, options: PiCallOptions): void {
+/** Validates registered tool provenance before selecting the session's active tools. */
+function applyPiTools(
+  session: AgentSession,
+  options: PiCallOptions,
+  explicitExtensionPaths: readonly string[],
+  registeredProvenance: ReadonlyMap<string, { source: string; sourcePath: string }>,
+): void {
   const allTools = session.getAllTools().map((tool) => ({
     name: tool.name,
     source: tool.sourceInfo.source,
+    sourcePath: extensionPathKey(options.cwd, tool.sourceInfo.path),
   }));
+  if (options.permissionMode !== 'full') {
+    for (const tool of allTools) {
+      const original = registeredProvenance.get(tool.name);
+      if (original !== undefined
+        ? original.source !== tool.source || original.sourcePath !== tool.sourcePath
+        : tool.source === 'builtin' || explicitExtensionPaths.includes(tool.sourcePath)) {
+        throw new Error('Pi explicit extension provenance could not be verified');
+      }
+    }
+    for (const [name, original] of registeredProvenance) {
+      if (explicitExtensionPaths.includes(original.sourcePath)
+        && allTools.filter((tool) => tool.name === name).length !== 1) {
+        throw new Error('Pi explicit extension provenance could not be verified');
+      }
+    }
+  }
   session.setActiveToolsByName(resolvePiActiveTools(
     options.permissionMode,
     options.allowedTools,
     allTools,
+    explicitExtensionPaths,
   ));
 }
 
+/**
+ * Enforces tool policy across SDK updates and cached calls using captured owners.
+ * Validation failure revokes tools, aborts the session, and remains latched even
+ * when an extension hook catches the exception.
+ */
+function installPiToolRefreshPolicy(
+  session: AgentSession,
+  extensionsResult: LoadExtensionsResult,
+  initialOptions: PiCallOptions,
+  explicitExtensionPaths: readonly string[],
+): { setOptions: (options: PiCallOptions) => void; assertHealthy: () => void } {
+  let currentOptions = initialOptions;
+  const extensionRuntime = extensionsResult.runtime;
+  let policyFailure: unknown;
+  const owners = extensionsResult.extensions.map((extension) => ({
+    tools: extension.tools,
+    source: extension.sourceInfo.source,
+    sourcePath: extensionPathKey(initialOptions.cwd, extension.sourceInfo.path),
+  }));
+  // Copy primitive provenance before binding extension lifecycle callbacks. SDK
+  // getAllTools() exposes mutable sourceInfo objects; never retain those objects.
+  const registeredProvenance = new Map(session.getAllTools().map((tool) => [tool.name, {
+    source: tool.sourceInfo.source,
+    sourcePath: extensionPathKey(initialOptions.cwd, tool.sourceInfo.path),
+  }]));
+  const refreshTools = extensionRuntime.refreshTools;
+  const setActiveTools = extensionRuntime.setActiveTools;
+  const enforce = (update?: () => void) => {
+    try {
+      if (policyFailure) throw policyFailure;
+      if (currentOptions.permissionMode !== 'full') {
+        for (const owner of owners) {
+          for (const [name, tool] of owner.tools) {
+            if (extensionPathKey(initialOptions.cwd, tool.sourceInfo.path) !== owner.sourcePath
+              || tool.sourceInfo.source !== owner.source) {
+              throw new Error('Pi explicit extension provenance could not be verified');
+            }
+            const original = registeredProvenance.get(name);
+            if (original && original.sourcePath !== owner.sourcePath) {
+              throw new Error('Pi explicit extension provenance could not be verified');
+            }
+            if (!original) registeredProvenance.set(name, { source: owner.source, sourcePath: owner.sourcePath });
+          }
+        }
+      }
+      update?.();
+      applyPiTools(session, currentOptions, explicitExtensionPaths, registeredProvenance);
+    } catch (error) {
+      policyFailure = error;
+      // SDK hook dispatch may swallow exceptions. Revoke tools synchronously,
+      // request cancellation, and retain the failure for the next call too.
+      session.setActiveToolsByName([]);
+      void session.abort().catch(() => undefined);
+      throw error;
+    }
+  };
+  extensionRuntime.refreshTools = () => {
+    enforce(refreshTools);
+  };
+  extensionRuntime.setActiveTools = (toolNames) => {
+    if (currentOptions.permissionMode === 'readonly'
+      || currentOptions.permissionMode === 'edit'
+      || currentOptions.allowedTools !== undefined) {
+      enforce();
+    } else {
+      if (policyFailure) throw policyFailure;
+      setActiveTools(toolNames);
+    }
+  };
+
+  return {
+    setOptions: (options) => {
+      currentOptions = options;
+      enforce();
+    },
+    assertHealthy: () => {
+      if (policyFailure) throw policyFailure;
+    },
+  };
+}
+
+/** Extracts enabled paths of one Pi resource kind from a resolved package. */
 function enabledResourcePaths(paths: ResolvedPaths, key: keyof ResolvedPaths): string[] {
   return paths[key]
     .filter((resource) => resource.enabled)
     .map((resource) => resource.path);
 }
 
+/** Counts all supported resource kinds, including packages with no extension module. */
 function countEnabledResolvedResources(paths: ResolvedPaths): number {
   return enabledResourcePaths(paths, 'extensions').length
     + enabledResourcePaths(paths, 'skills').length
@@ -564,34 +680,7 @@ function extensionPathKey(cwd: string, extensionPath: string): string {
   return path.resolve(cwd, extensionPath);
 }
 
-function failedExtensionSources(
-  cwd: string,
-  resolutions: readonly ExtensionSourceResolution[],
-  loadErrors: readonly ExtensionLoadError[],
-): Set<ExtensionSourceResolution> | undefined {
-  const ownersByPath = new Map<string, ExtensionSourceResolution[]>();
-  for (const resolution of resolutions) {
-    for (const extensionPath of enabledResourcePaths(resolution.candidate.paths, 'extensions')) {
-      const key = extensionPathKey(cwd, extensionPath);
-      ownersByPath.set(key, [...(ownersByPath.get(key) ?? []), resolution]);
-    }
-  }
-
-  const failedResolutions = new Set<ExtensionSourceResolution>();
-  for (const loadError of loadErrors) {
-    const owners = ownersByPath.get(extensionPathKey(cwd, loadError.path));
-    if (owners?.length !== 1) {
-      return undefined;
-    }
-    const owner = owners[0];
-    if (owner === undefined) {
-      return undefined;
-    }
-    failedResolutions.add(owner);
-  }
-  return failedResolutions;
-}
-
+/** Filters loader errors whose module did not also load successfully. */
 function actualExtensionLoadErrors(
   cwd: string,
   extensionsResult: LoadExtensionsResult,
@@ -604,28 +693,116 @@ function actualExtensionLoadErrors(
   ));
 }
 
-function loadErrorsForResolution(
+/** Returns normalized loader identities used to match an explicitly resolved module. */
+function explicitExtensionPathCandidates(
   cwd: string,
-  resolution: ExtensionSourceResolution,
-  loadErrors: readonly ExtensionLoadError[],
-): ExtensionLoadError[] {
-  const candidatePaths = new Set(
-    enabledResourcePaths(resolution.candidate.paths, 'extensions')
-      .map((extensionPath) => extensionPathKey(cwd, extensionPath)),
-  );
-  return loadErrors.filter((loadError) => candidatePaths.has(extensionPathKey(cwd, loadError.path)));
+  extension: LoadExtensionsResult['extensions'][number],
+): Set<string> {
+  return new Set([
+    extension.path,
+    extension.resolvedPath,
+    extension.sourceInfo.path,
+  ].map((extensionPath) => extensionPathKey(cwd, extensionPath)));
 }
 
+/**
+ * Extracts trusted module paths without rejecting skill/prompt/theme-only packages.
+ * Candidate resolution already rejects packages with no enabled resources.
+ */
+function explicitExtensionPathsForResolutions(
+  cwd: string,
+  resolutions: readonly ExtensionSourceResolution[],
+): string[] {
+  const paths = resolutions.flatMap((resolution) => {
+    const extensionPaths = enabledResourcePaths(resolution.candidate.paths, 'extensions');
+    return extensionPaths.map((extensionPath) => extensionPathKey(cwd, extensionPath));
+  });
+  return [...new Set(paths)];
+}
+
+/** Requires each explicit module path to identify exactly one consistent loaded extension. */
+function assertLoadedExplicitExtensions(
+  cwd: string,
+  explicitExtensionPaths: readonly string[],
+  extensionsResult: LoadExtensionsResult,
+): void {
+  const explicitPaths = new Set(explicitExtensionPaths);
+  for (const explicitPath of explicitPaths) {
+    const matches = extensionsResult.extensions.filter((extension) => (
+      explicitExtensionPathCandidates(cwd, extension).has(explicitPath)
+    ));
+    if (matches.length !== 1) {
+      throw new Error('Pi explicit extension provenance could not be verified');
+    }
+    const extension = matches[0];
+    if (extension === undefined) {
+      throw new Error('Pi explicit extension provenance could not be verified');
+    }
+    const extensionPath = extensionPathKey(cwd, extension.path);
+    const resolvedPath = extensionPathKey(cwd, extension.resolvedPath);
+    const sourceInfoPath = extensionPathKey(cwd, extension.sourceInfo.path);
+    if (sourceInfoPath !== extensionPath && sourceInfoPath !== resolvedPath) {
+      throw new Error('Pi explicit extension provenance could not be verified');
+    }
+  }
+}
+
+/** Checks that explicit tool definitions and the SDK registry agree on ownership. */
+function assertExplicitExtensionTools(
+  cwd: string,
+  explicitExtensionPaths: readonly string[],
+  extensionsResult: LoadExtensionsResult,
+  allTools: readonly PiAgentToolInfo[],
+): void {
+  const explicitPaths = new Set(explicitExtensionPaths);
+  if (explicitPaths.size === 0) {
+    return;
+  }
+
+  const explicitToolNames = new Set<string>();
+  for (const extension of extensionsResult.extensions) {
+    if (![...explicitExtensionPathCandidates(cwd, extension)].some((candidate) => explicitPaths.has(candidate))) {
+      continue;
+    }
+    for (const [toolName, tool] of extension.tools) {
+      explicitToolNames.add(toolName);
+      const toolSourcePath = extensionPathKey(cwd, tool.sourceInfo.path);
+      if (!explicitPaths.has(toolSourcePath)) {
+        throw new Error('Pi explicit extension provenance could not be verified');
+      }
+      const registeredTools = allTools.filter((candidate) => candidate.name === toolName);
+      if (registeredTools.length !== 1) {
+        throw new Error('Pi explicit extension provenance could not be verified');
+      }
+      const registeredTool = registeredTools[0];
+      if (registeredTool === undefined || extensionPathKey(cwd, registeredTool.sourceInfo.path) !== toolSourcePath) {
+        throw new Error('Pi explicit extension provenance could not be verified');
+      }
+    }
+  }
+
+  for (const tool of allTools) {
+    if (!explicitPaths.has(extensionPathKey(cwd, tool.sourceInfo.path))) {
+      continue;
+    }
+    if (!explicitToolNames.has(tool.name)) {
+      throw new Error('Pi explicit extension provenance could not be verified');
+    }
+  }
+}
+
+/** Releases extension runtime resources when no session will own the rejected loader. */
 function invalidateRejectedResourceLoader(resourceLoader: DefaultResourceLoader): void {
   resourceLoader.getExtensions().runtime.invalidate('Pi extension candidate was rejected');
 }
 
+/** Resolves and loads explicit Pi resources, rejecting load errors and ambiguous provenance. */
 async function resolvePiResourceLoader(
   cwd: string,
   agentDir: string,
   options: PiCallOptions,
   settingsManager: SettingsManager,
-): Promise<DefaultResourceLoader> {
+): Promise<PiResourceLoaderResolution> {
   assertPiSessionNotAborted(options.abortSignal);
   const sources = (options.providerOptions?.extensions ?? []).map((source) => source.trim());
   if (sources.length > 0) {
@@ -645,15 +822,15 @@ async function resolvePiResourceLoader(
     resolutions.push({ ...search, candidate });
   }
 
-  while (true) {
+  assertPiSessionNotAborted(options.abortSignal);
+  const resolved = mergeExtensionSourcePaths(resolutions);
+  const explicitExtensionPaths = explicitExtensionPathsForResolutions(cwd, resolutions);
+  const resourceLoader = createPiResourceLoader(cwd, agentDir, options, settingsManager, resolved);
+  try {
     assertPiSessionNotAborted(options.abortSignal);
-    const resolved = mergeExtensionSourcePaths(resolutions);
-    const resourceLoader = createPiResourceLoader(cwd, agentDir, options, settingsManager, resolved);
     try {
-      assertPiSessionNotAborted(options.abortSignal);
       await resourceLoader.reload();
     } catch (error) {
-      invalidateRejectedResourceLoader(resourceLoader);
       if (isAbortRequested(options.abortSignal)) {
         throwPiSessionAborted();
       }
@@ -663,42 +840,22 @@ async function resolvePiResourceLoader(
       );
     }
     if (isAbortRequested(options.abortSignal)) {
-      invalidateRejectedResourceLoader(resourceLoader);
       throwPiSessionAborted();
     }
 
     const extensionsResult = resourceLoader.getExtensions();
     const loadErrors = actualExtensionLoadErrors(cwd, extensionsResult);
-    if (loadErrors.length === 0) {
-      return resourceLoader;
-    }
-
-    const failedResolutions = failedExtensionSources(cwd, resolutions, loadErrors);
-    if (failedResolutions === undefined || failedResolutions.size === 0) {
-      invalidateRejectedResourceLoader(resourceLoader);
+    if (loadErrors.length > 0) {
       throw new Error(`Pi extension loading failed: ${formatExtensionLoadErrors(loadErrors)}`);
     }
-
-    for (const resolution of failedResolutions) {
-      const candidate = resolution.candidate;
-      const candidateErrors = loadErrorsForResolution(cwd, resolution, loadErrors);
-      recordExtensionCandidateFailure(
-        resolution.source,
-        resolution.failures,
-        candidate.scope,
-        `Pi extension loading failed: ${formatExtensionLoadErrors(candidateErrors)}`,
-      );
-    }
-
+    assertLoadedExplicitExtensions(cwd, explicitExtensionPaths, extensionsResult);
+    return { resourceLoader, explicitExtensionPaths };
+  } catch (error) {
     invalidateRejectedResourceLoader(resourceLoader);
-    for (const resolution of failedResolutions) {
-      resolution.candidate = await resolveNextExtensionCandidate(
-        packageManager,
-        projectLookup,
-        resolution,
-        options.abortSignal,
-      );
+    if (isAbortRequested(options.abortSignal)) {
+      throwPiSessionAborted();
     }
+    throw error;
   }
 }
 
@@ -993,6 +1150,7 @@ function cacheSessionRecord(record: PiSessionRecord, sessionIds: readonly string
   enforcePiSessionCacheLimit();
 }
 
+/** Creates a session with verified resources and policy hooks before extension startup. */
 async function createPiSession(
   options: PiCallOptions,
   agentDir: string,
@@ -1009,12 +1167,13 @@ async function createPiSession(
   if (isAbortRequested(options.abortSignal)) {
     throw new Error('Pi session aborted');
   }
-  const resourceLoader = await resolvePiResourceLoader(
+  const resourceLoaderResolution = await resolvePiResourceLoader(
     options.cwd,
     agentDir,
     options,
     settingsManager,
   );
+  const { resourceLoader, explicitExtensionPaths } = resourceLoaderResolution;
   let result: Awaited<ReturnType<typeof createAgentSession>>;
   try {
     if (isAbortRequested(options.abortSignal)) {
@@ -1062,6 +1221,18 @@ async function createPiSession(
         `Pi extension loading failed: ${formatExtensionLoadErrors(result.extensionsResult.errors)}`,
       );
     }
+    const toolPolicy = installPiToolRefreshPolicy(
+      result.session,
+      result.extensionsResult,
+      options,
+      explicitExtensionPaths,
+    );
+    assertExplicitExtensionTools(
+      options.cwd,
+      explicitExtensionPaths,
+      result.extensionsResult,
+      result.session.getAllTools(),
+    );
 
     const extensionErrors: string[] = [];
     await result.session.bindExtensions({
@@ -1080,6 +1251,8 @@ async function createPiSession(
       runtime,
       cwd: options.cwd,
       configurationFingerprint,
+      setPiToolPolicyOptions: toolPolicy.setOptions,
+      assertPiToolPolicyHealthy: toolPolicy.assertHealthy,
       thinkingLevelOverrideActive: false,
       extensionErrors,
       operationTail: Promise.resolve(),
@@ -1392,6 +1565,7 @@ function handlePiEvent(
   }
 }
 
+/** Runs a serialized Pi turn, reusing compatible sessions and reporting provider failures. */
 export async function callPi(
   agentType: string,
   prompt: string,
@@ -1417,7 +1591,7 @@ export async function callPi(
         throw new Error(`Pi extension failed: ${record.extensionErrors.splice(0).join('; ')}`);
       }
       await applyPiModel(record, options.model, options.providerOptions?.thinkingLevel);
-      applyPiTools(session, options);
+      record.setPiToolPolicyOptions(options);
       const state: PiTurnState = {
         responseText: '',
         assistantError: undefined,
@@ -1487,6 +1661,7 @@ export async function callPi(
       if (isAbortRequested(options.abortSignal) || state.assistantAborted) {
         throw new Error('Pi session aborted');
       }
+      record.assertPiToolPolicyHealthy();
       if (state.assistantError !== undefined) {
         throw new Error(state.assistantError);
       }
