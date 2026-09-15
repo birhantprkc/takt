@@ -20,6 +20,7 @@ import {
 } from './api.js';
 import { createExecutionView } from './execution-view.js';
 import { subscribeRun, subscribeTasks } from './live-stream.js';
+import { renderMarkdown } from './markdown-view.js';
 import {
   buildTaskActionDialogModel,
   taskActionGoState,
@@ -878,7 +879,7 @@ function updateChatSessionDescription(session) {
   syncChatControls();
 }
 
-function appendChatEntry(role, content) {
+function appendChatEntry(role, content, contentFormat = role === 'assistant' ? 'markdown' : 'literal') {
   const entry = createElement('article', `chat-entry chat-entry-${role}`);
   const roleKey = role === 'user'
     ? 'app.roleUser'
@@ -887,7 +888,7 @@ function appendChatEntry(role, content) {
   roleLabel.dataset.i18n = roleKey;
   entry.append(
     roleLabel,
-    createElement('p', '', content),
+    contentFormat === 'markdown' ? renderMarkdown(content) : createElement('p', '', content),
   );
   elements.chatTranscript.querySelector('.chat-placeholder')?.remove();
   elements.chatTranscript.append(entry);
@@ -1438,7 +1439,7 @@ async function submitChat(event) {
             instructionRoute.task,
             taskActionOptionId,
           );
-          appendChatEntry('assistant', instructionRoute.task);
+          appendChatEntry('assistant', instructionRoute.task, 'literal');
           renderTaskActionContext();
           syncChatControls();
           focusRetryReviewQueue();

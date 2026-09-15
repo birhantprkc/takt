@@ -100,6 +100,8 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/interactive.test.ts',
   'src/__tests__/it-central-task-process.test.ts',
   'src/__tests__/it-report-inheritance-task-resume.test.ts',
+  // Launches a real Chrome/Chromium child process for browser layout assertions.
+  'src/__tests__/it-web-ui-retry-dom.test.ts',
   'src/__tests__/kiro-config.test.ts',
   'src/__tests__/mock-call-log.test.ts',
   'src/__tests__/opencode-client-cleanup.test.ts',

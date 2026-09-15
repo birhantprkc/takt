@@ -1,5 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { chromium, type Browser } from 'playwright';
+import type { WebChatService, WebChatSessionDescription } from '../features/web-ui/chat.js';
+import { registerProject } from '../infra/config/global/projectRegistry.js';
+import { CentralTaskRepository } from '../infra/task/centralStateRepository.js';
+import { createWebUiServer, listenWebUiServer } from '../features/web-ui/server.js';
+import type { WebWorkflowCatalog } from '../features/web-ui/workflow-catalog.js';
 
 interface FakeEvent {
   readonly type: string;
@@ -293,6 +301,118 @@ function streamResponse(reply: unknown) {
   };
 }
 
+const assistantMarkdown = [
+  '# 見出し',
+  '',
+  '- 箇条書き',
+  '- 二つ目',
+  '',
+  '1. 番号付き',
+  '2. 二つ目',
+  '',
+  '**太字** と `インライン` と [リンク](https://example.com)',
+  '続き',
+  '',
+  '```js',
+  'const value = 1;',
+  '```',
+].join('\n');
+
+const fencedCodeCases = [
+  ['言語名付き', '```js\n# 見出し\n- 項目\n**太字**\n```'],
+  ['言語名なし', '```\n# 見出し\n- 項目\n**太字**\n```'],
+  ['閉じられていない', '```\n# 見出し\n- 項目\n**太字**'],
+] as const;
+
+const literalMessage = '# 通知\n**原文**\n- 項目\n次の行';
+
+const BROWSER_CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const BROWSER_EXECUTABLE_CANDIDATES = [
+  BROWSER_CHROME_PATH,
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+] as const;
+const BROWSER_LITERAL_USER_MESSAGE = '# user\n**raw**\n- item\nnext line';
+const BROWSER_LITERAL_SYSTEM_MESSAGE = '# system\n**raw**\n- item\nnext line';
+const BROWSER_LITERAL_RETRY_MESSAGE = [
+  '# retry',
+  '**raw**',
+  '- item',
+  'next line with a deliberately long unbroken token: retry-instruction-wrap-check-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+].join('\n');
+const BROWSER_ASSISTANT_MARKDOWN = '# assistant\n\n**rendered**\nsecond line';
+
+interface BrowserLiteralRange {
+  setStart(node: object, offset: number): void;
+  setEnd(node: object, offset: number): void;
+  getBoundingClientRect(): { readonly top: number };
+}
+
+interface BrowserLiteralElement {
+  readonly textContent: string | null;
+  readonly firstChild: object | null;
+  readonly ownerDocument: {
+    readonly defaultView: {
+      getComputedStyle(node: BrowserLiteralElement): {
+        readonly whiteSpace: string;
+        readonly overflowWrap: string;
+      };
+    } | null;
+    createRange(): BrowserLiteralRange;
+  };
+}
+
+interface BrowserLiteralObservation {
+  readonly textContent: string;
+  readonly whiteSpace: string;
+  readonly overflowWrap: string;
+  readonly lineTops: readonly number[];
+}
+
+function readBrowserWhiteSpace(node: unknown): string {
+  const element = node as BrowserLiteralElement;
+  const defaultView = element.ownerDocument.defaultView;
+  if (defaultView === null) throw new Error('Markdown paragraph has no measurable document');
+  return defaultView.getComputedStyle(element).whiteSpace;
+}
+
+function measureBrowserLiteralParagraph(node: unknown): BrowserLiteralObservation {
+  const element = node as BrowserLiteralElement;
+  const text = element.textContent;
+  const textNode = element.firstChild;
+  const defaultView = element.ownerDocument.defaultView;
+  if (text === null || textNode === null || defaultView === null) {
+    throw new Error('Literal paragraph has no measurable text node');
+  }
+  const style = defaultView.getComputedStyle(element);
+  const lineTops: number[] = [];
+  let offset = 0;
+  for (const line of text.split('\n')) {
+    const range = element.ownerDocument.createRange();
+    range.setStart(textNode, offset);
+    range.setEnd(textNode, offset + line.length);
+    lineTops.push(Math.round(range.getBoundingClientRect().top));
+    offset += line.length + 1;
+  }
+  return {
+    textContent: text,
+    whiteSpace: style.whiteSpace,
+    overflowWrap: style.overflowWrap,
+    lineTops,
+  };
+}
+
+function browserExecutablePath(): string | undefined {
+  const configuredPath = process.env.TAKT_BROWSER_EXECUTABLE_PATH;
+  if (configuredPath !== undefined) return configuredPath;
+  const hostBrowser = BROWSER_EXECUTABLE_CANDIDATES.find((path) => existsSync(path));
+  if (hostBrowser !== undefined) return hostBrowser;
+  const bundledPath = chromium.executablePath();
+  return existsSync(bundledPath) ? bundledPath : undefined;
+}
+
 function createDocument() {
   const document = new FakeDocument();
   const selectors = [
@@ -376,6 +496,7 @@ describe('Web UI Retry 本番 DOM 経路', () => {
   let failNextQueueRequest = false;
   let continueRequestGate: Promise<void> | undefined;
   let cancelRequestGate: Promise<void> | undefined;
+  let nextAssistantReply = assistantMarkdown;
   const task = {
     projectId: 'project-1',
     taskId: 'task-1',
@@ -403,6 +524,7 @@ describe('Web UI Retry 本番 DOM 経路', () => {
     failNextQueueRequest = false;
     continueRequestGate = undefined;
     cancelRequestGate = undefined;
+    nextAssistantReply = assistantMarkdown;
     document = createDocument();
     const window = {
       addEventListener: vi.fn(),
@@ -450,6 +572,12 @@ describe('Web UI Retry 本番 DOM 経路', () => {
         if (body.text === '/retry' || body.text === '/replay') {
           return streamResponse({ kind: 'assistant_response', content: `${body.text} handled in chat` });
         }
+        if (body.text === '/system') {
+          return streamResponse({ kind: 'error', message: literalMessage });
+        }
+        if (body.text === '/markdown' || body.text === '/code' || body.text === '/inline-code') {
+          return streamResponse({ kind: 'assistant_response', content: nextAssistantReply });
+        }
         if (body.text !== '/go') {
           return streamResponse({ kind: 'assistant_response', content: 'additional response' });
         }
@@ -480,8 +608,367 @@ describe('Web UI Retry 本番 DOM 経路', () => {
     await flush();
   });
 
+  async function submitChat(text: string) {
+    const message = document.nodes.get('#chat-message');
+    const form = document.nodes.get('#chat-form');
+    if (message === undefined || form === undefined) {
+      throw new Error('Chat DOM elements were not initialized');
+    }
+    message.value = text;
+    form.requestSubmit();
+    await flush();
+  }
+
+  function chatTranscript() {
+    const transcript = document.nodes.get('#chat-transcript');
+    if (transcript === undefined) throw new Error('Chat transcript was not initialized');
+    return transcript;
+  }
+
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('renders assistant responses with the existing Markdown elements', async () => {
+    await startRetry();
+    await submitChat('/markdown');
+
+    const entry = chatTranscript().querySelector('article.chat-entry-assistant');
+    if (entry === null) throw new Error('Assistant chat entry was not rendered');
+    const markdown = entry.querySelector('.markdown-view');
+    if (markdown === null) throw new Error('Assistant Markdown view was not rendered');
+
+    expect(markdown.querySelector('h1')?.textContent).toBe('見出し');
+    expect(markdown.querySelector('ul')?.querySelectorAll('li').map((item) => item.textContent))
+      .toEqual(['箇条書き', '二つ目']);
+    expect(markdown.querySelector('ol')?.querySelectorAll('li').map((item) => item.textContent))
+      .toEqual(['番号付き', '二つ目']);
+    expect(markdown.querySelector('strong')?.textContent).toBe('太字');
+    expect(markdown.querySelectorAll('code')[0]?.textContent).toBe('インライン');
+    const link = markdown.querySelector('a');
+    if (link === null) throw new Error('Markdown link was not rendered');
+    expect(link.textContent).toBe('リンク');
+    expect(Reflect.get(link, 'href')).toBe('https://example.com');
+    expect(markdown.querySelector('p')?.textContent).toBe('太字 と インライン と リンク 続き');
+    expect(markdown.querySelector('pre')?.querySelector('code')?.textContent)
+      .toBe('const value = 1;');
+  });
+
+  it.each(fencedCodeCases)('keeps Markdown syntax inside %s fenced code', async (_caseName, source) => {
+    nextAssistantReply = source;
+    await startRetry();
+    await submitChat('/code');
+
+    const entry = chatTranscript().querySelector('article.chat-entry-assistant');
+    if (entry === null) throw new Error('Assistant chat entry was not rendered');
+    const markdown = entry.querySelector('.markdown-view');
+    if (markdown === null) throw new Error('Assistant Markdown view was not rendered');
+
+    expect(markdown.querySelectorAll('h1')).toHaveLength(0);
+    expect(markdown.querySelectorAll('ul')).toHaveLength(0);
+    expect(markdown.querySelectorAll('strong')).toHaveLength(0);
+    expect(markdown.querySelector('pre')?.querySelector('code')?.textContent)
+      .toBe('# 見出し\n- 項目\n**太字**');
+  });
+
+  it('keeps emphasis syntax inside inline code as code text', async () => {
+    nextAssistantReply = '`**太字**`';
+    await startRetry();
+    await submitChat('/inline-code');
+
+    const entry = chatTranscript().querySelector('article.chat-entry-assistant');
+    if (entry === null) throw new Error('Assistant chat entry was not rendered');
+    const markdown = entry.querySelector('.markdown-view');
+    if (markdown === null) throw new Error('Assistant Markdown view was not rendered');
+
+    expect(markdown.querySelectorAll('strong')).toHaveLength(0);
+    expect(markdown.querySelector('code')?.textContent).toBe('**太字**');
+  });
+
+  it('keeps Markdown syntax and line breaks literal for user messages', async () => {
+    await startRetry();
+    await submitChat(literalMessage);
+
+    const entry = chatTranscript().querySelector('article.chat-entry-user');
+    if (entry === null) throw new Error('User chat entry was not rendered');
+    expect(entry.querySelector('.markdown-view')).toBeNull();
+    expect(entry.querySelector('p')?.textContent).toBe(literalMessage);
+    expect(entry.querySelectorAll('h1')).toHaveLength(0);
+    expect(entry.querySelectorAll('strong')).toHaveLength(0);
+    expect(entry.querySelectorAll('ul')).toHaveLength(0);
+  });
+
+  it('keeps Markdown syntax and line breaks literal for system messages', async () => {
+    await startRetry();
+    await submitChat('/system');
+
+    const entries = chatTranscript().querySelectorAll('article.chat-entry-system');
+    const entry = entries.at(-1);
+    if (entry === undefined) throw new Error('System chat entry was not rendered');
+    expect(entry.querySelector('.markdown-view')).toBeNull();
+    expect(entry.querySelector('p')?.textContent).toBe(literalMessage);
+    expect(entry.querySelectorAll('h1')).toHaveLength(0);
+    expect(entry.querySelectorAll('strong')).toHaveLength(0);
+    expect(entry.querySelectorAll('ul')).toHaveLength(0);
+  });
+
+  const browserRegressionTest = process.env.CI === undefined
+    ? it.skipIf(browserExecutablePath() === undefined)
+    : it;
+
+  browserRegressionTest(
+    'preserves Markdown rendering and literal line breaks in the rendered browser',
+    async () => {
+      const executablePath = browserExecutablePath();
+      if (executablePath === undefined) {
+        throw new Error('A Chrome or Playwright browser executable is required for this regression test');
+      }
+      const globalConfigDirectory = mkdtempSync(join(tmpdir(), 'takt-browser-global-'));
+      const projectDirectory = mkdtempSync(join(tmpdir(), 'takt-browser-project-'));
+      let server: Awaited<ReturnType<typeof createWebUiServer>> | undefined;
+      let browser: Browser | undefined;
+      try {
+        const project = await registerProject({
+          globalConfigDirectory,
+          projectDirectory,
+          command: 'ui',
+        });
+        const repository = await CentralTaskRepository.open({
+          globalConfigDirectory,
+          stateId: project.stateId,
+          locationId: project.locationId,
+          canonicalDirectory: project.canonicalDirectory,
+          displayName: project.displayName,
+          fingerprint: project.fingerprint,
+        });
+        const handle = await repository.enqueueAndClaim({
+          task: 'original order',
+          workflow: 'default',
+          worktree: true,
+          branch: 'codex/browser-retry',
+          baseBranch: 'main',
+        });
+        const runningTask = await repository.adopt({
+          taskId: handle.task.taskId,
+          generation: handle.task.generation,
+          executionId: handle.executionId,
+          ownerToken: handle.ownerToken,
+          pid: process.pid,
+        });
+        const contextualTask = await repository.updateExecutionContext({
+          taskId: runningTask.taskId,
+          generation: runningTask.generation,
+          executionId: handle.executionId,
+          ownerToken: handle.ownerToken,
+          worktreePath: join(projectDirectory, 'takt-worktree'),
+        });
+        const failedTask = await repository.terminal({
+          taskId: contextualTask.taskId,
+          generation: contextualTask.generation,
+          executionId: handle.executionId,
+          ownerToken: handle.ownerToken,
+          status: 'failed',
+          failure: { code: 'browser_fixture', message: 'browser fixture task' },
+        });
+        const session: WebChatSessionDescription = {
+          id: 'browser-session',
+          workflow: 'default',
+          mode: 'assistant',
+          intro: '',
+          provider: 'mock',
+        };
+        const retrySession: WebChatSessionDescription = {
+          id: 'browser-retry-session',
+          workflow: 'default',
+          mode: 'assistant',
+          intro: '',
+          provider: 'mock',
+          taskAction: {
+            sessionId: 'browser-retry-session',
+            taskId: failedTask.taskId,
+            action: 'retry',
+            generation: failedTask.generation,
+            retryStartOptions: {
+              defaultId: 'restart:plan',
+              options: [{ id: 'restart:plan', label: 'plan', selectable: true }],
+            },
+          },
+        };
+        const chat: WebChatService = {
+          create: (_projectDirectory, _request) => session,
+          reconfigure: (_sessionId, _request) => session,
+          restart: (_sessionId) => session,
+          send: async (sessionId, text) => {
+            if (sessionId === retrySession.id && text === '/go') {
+              return {
+                kind: 'task_instruction',
+                task: BROWSER_LITERAL_RETRY_MESSAGE,
+                taskAction: {
+                  sessionId: retrySession.id,
+                  taskId: failedTask.taskId,
+                  action: 'retry',
+                },
+                taskActionOptionId: 'restart:plan',
+              };
+            }
+            if (text === '/system') return { kind: 'error', message: BROWSER_LITERAL_SYSTEM_MESSAGE };
+            return { kind: 'assistant_response', content: BROWSER_ASSISTANT_MARKDOWN };
+          },
+          commitTaskAction: (_sessionId, _reservationToken) => undefined,
+          releaseTaskAction: (_sessionId, _reservationToken) => undefined,
+        };
+        const catalog: WebWorkflowCatalog = {
+          categories: [{
+            id: 'default',
+            label: 'Default',
+            workflows: [{ id: 'default', description: 'Browser verification', source: 'builtin' }],
+          }],
+          warnings: [],
+        };
+        server = await createWebUiServer({
+          globalConfigDirectory,
+          launch: async () => ({ pid: 1, disposition: 'started' as const, mode: 'run' as const }),
+          taskActionConversation: async (_projectDirectory, taskId, action) => {
+            if (taskId !== failedTask.taskId || action !== 'retry') {
+              throw new Error('Unexpected browser task action');
+            }
+            return {
+              action: 'retry',
+              taskId,
+              status: 'conversation' as const,
+              chatSession: retrySession,
+            };
+          },
+          chat,
+          getWorkflowCatalog: () => catalog,
+        });
+        const origin = await listenWebUiServer(server, 0);
+        browser = await chromium.launch({ executablePath, headless: true });
+        const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+        const pageErrors: string[] = [];
+        page.on('pageerror', (error) => pageErrors.push(error.message));
+
+        await page.goto(origin, { waitUntil: 'domcontentloaded' });
+        await page.selectOption('#project', project.id);
+        await page.locator('#workflow option[value="default"]').waitFor({ state: 'attached', timeout: 5000 });
+        await page.waitForFunction(
+          '() => !document.querySelector("#chat-message")?.disabled',
+          undefined,
+          { timeout: 5000 },
+        );
+        await page.click('#new-task-button');
+
+        const sendMessage = async (text: string): Promise<void> => {
+          const messageInput = page.locator('#chat-message');
+          await messageInput.click();
+          await messageInput.fill(text);
+          await page.click('#chat-send-button');
+        };
+        const waitForNextAssistantResponse = async (): Promise<void> => {
+          await page.locator('article.chat-entry-assistant').last().waitFor();
+          await page.waitForFunction(
+            '() => !document.querySelector("#chat-send-button")?.disabled',
+            undefined,
+            { timeout: 5000 },
+          );
+        };
+
+        await sendMessage(BROWSER_LITERAL_USER_MESSAGE);
+        const userParagraph = page.locator('article.chat-entry-user').last().locator('p');
+        await userParagraph.waitFor();
+        await waitForNextAssistantResponse();
+        const userObservation = await userParagraph.evaluate(measureBrowserLiteralParagraph);
+        const assistantEntry = page.locator('article.chat-entry-assistant').last();
+        const assistantMarkdown = assistantEntry.locator('.markdown-view');
+        await assistantMarkdown.waitFor();
+        expect(await assistantMarkdown.locator('h1').textContent()).toBe('assistant');
+        expect(await assistantMarkdown.locator('strong').textContent()).toBe('rendered');
+        expect(await assistantMarkdown.locator('p').evaluate(readBrowserWhiteSpace))
+          .toBe('normal');
+
+        await sendMessage('/system');
+        const systemParagraph = page.locator('article.chat-entry-system').last().locator('p');
+        await systemParagraph.waitFor();
+        const systemObservation = await systemParagraph.evaluate(measureBrowserLiteralParagraph);
+
+        expect(userObservation.textContent).toBe(BROWSER_LITERAL_USER_MESSAGE);
+        expect(userObservation.whiteSpace).toBe('pre-wrap');
+        expect(new Set(userObservation.lineTops).size)
+          .toBe(BROWSER_LITERAL_USER_MESSAGE.split('\n').length);
+        expect(systemObservation.textContent).toBe(BROWSER_LITERAL_SYSTEM_MESSAGE);
+        expect(systemObservation.whiteSpace).toBe('pre-wrap');
+        expect(new Set(systemObservation.lineTops).size)
+          .toBe(BROWSER_LITERAL_SYSTEM_MESSAGE.split('\n').length);
+
+        await page.click('#chat-collapse-button');
+        await page.waitForFunction(
+          '() => document.body.dataset.screen === "viewer"',
+          undefined,
+          { timeout: 5000 },
+        );
+        const taskCard = page.locator(`article.task-card[data-task-id="${failedTask.taskId}"]`);
+        await taskCard.waitFor();
+        await taskCard.locator('details.task-actions > summary').click();
+        const retryButton = taskCard.locator('button.task-action-retry');
+        await retryButton.click();
+        await page.waitForFunction(
+          '() => document.body.dataset.screen === "task"'
+            + ' && document.querySelector("#chat-surface")?.dataset.open === "true"'
+            + ' && document.querySelector("#chat-task-action-context")?.hidden === false',
+          undefined,
+          { timeout: 5000 },
+        );
+        const retryButtonSelector = `article.task-card[data-task-id="${failedTask.taskId}"] button.task-action-retry`;
+        await page.waitForFunction(
+          '(selector) => document.querySelector(selector)?.disabled === false',
+          retryButtonSelector,
+          { timeout: 5000 },
+        );
+        await page.waitForFunction(
+          '() => !document.querySelector("#chat-message")?.disabled',
+          undefined,
+          { timeout: 5000 },
+        );
+
+        await sendMessage('/markdown');
+        const retryAssistantEntry = page.locator('article.chat-entry-assistant').last();
+        await retryAssistantEntry.locator('.markdown-view').waitFor();
+        await waitForNextAssistantResponse();
+
+        await sendMessage('/go');
+        const retryParagraph = page.locator('article.chat-entry-assistant').last().locator(':scope > p');
+        await retryParagraph.waitFor();
+        const retryObservation = await retryParagraph.evaluate(measureBrowserLiteralParagraph);
+        expect(retryObservation.textContent).toBe(BROWSER_LITERAL_RETRY_MESSAGE);
+        expect(retryObservation.whiteSpace).toBe('pre-wrap');
+        expect(retryObservation.overflowWrap).toBe('anywhere');
+        expect(new Set(retryObservation.lineTops).size)
+          .toBe(BROWSER_LITERAL_RETRY_MESSAGE.split('\n').length);
+        expect(pageErrors).toEqual([]);
+      } finally {
+        await browser?.close();
+        if (server?.listening === true) {
+          server.closeAllConnections();
+          await new Promise<void>((resolvePromise, rejectPromise) => {
+            server?.close((error) => error === undefined
+              ? resolvePromise()
+              : rejectPromise(error));
+          });
+        }
+        rmSync(globalConfigDirectory, { recursive: true, force: true });
+        rmSync(projectDirectory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('renders retry task instructions as literal assistant text', async () => {
+    await startRetry();
+    await submitChat('/go');
+
+    const entry = chatTranscript().querySelector('article.chat-entry-assistant');
+    if (entry === null) throw new Error('Retry instruction chat entry was not rendered');
+    expect(entry.querySelector('.markdown-view')).toBeNull();
+    expect(entry.querySelector('p')?.textContent).toBe('updated order');
   });
 
   it('connects Queue, Continue, Cancel, and prose input through the production app and API modules', async () => {
