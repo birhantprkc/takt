@@ -80,15 +80,33 @@ describe('shipped development completion and remediation routes', () => {
     expect(implementation?.instructionRef).not.toContain('development-implementation-completion');
   });
 
-  it.each(variants(implementations))('$language/$name sends executable incompleteness to reimplement and repeats until complete', async ({ language, name }) => {
+  it.each(variants(implementations))('$language/$name sends executable incompleteness to reimplement once, then hands remaining gaps to planning', async ({ language, name }) => {
     const config = load(language, name);
     start(config, 'implement');
     const pending = await execute(config, 'implement', 2);
     expect(pending.nextStep).toBe('reimplement');
     expect(pending.isComplete).toBe(false);
     expect(pending.returnValue).toBeUndefined();
-    expect((await execute(config, 'reimplement', 2)).nextStep).toBe('reimplement');
+    const remaining = await execute(config, 'reimplement', 2);
+    expect(remaining).toMatchObject({ isComplete: true, returnValue: 'need_replan' });
+    expect(remaining.nextStep).toBe('COMPLETE');
+    start(config, 'reimplement');
     expect((await execute(config, 'reimplement', 0)).nextStep).toBe('COMPLETE');
+  });
+
+  it.each(variants(implementations))('$language/$name keeps reimplement destinations within the allowed set and gates self-resume on user input', ({ language, name }) => {
+    const step = load(language, name).steps.find(candidate => candidate.name === 'reimplement');
+    const selfRoutes = step?.rules?.filter(rule => rule.next === 'reimplement') ?? [];
+    expect(selfRoutes).toHaveLength(1);
+    expect(selfRoutes[0]).toMatchObject({
+      requiresUserInput: true,
+      interactiveOnly: true,
+    });
+    expect(step?.rules?.every(rule => (
+      (rule.next === 'COMPLETE' && rule.returnValue === undefined)
+      || rule.returnValue === 'need_replan'
+      || (rule.next === 'reimplement' && rule.requiresUserInput === true && rule.interactiveOnly === true)
+    ))).toBe(true);
   });
 
   it.each(variants(implementations))('$language/$name returns only an invalid plan to its caller', async ({ language, name }) => {
@@ -114,7 +132,6 @@ describe('shipped development completion and remediation routes', () => {
     for (const stepName of ['implement', 'reimplement']) {
       const step = config.steps.find(candidate => candidate.name === stepName);
       expect(step?.rules?.some(rule => rule.next === 'ABORT')).toBe(false);
-      expect(step?.rules?.filter(rule => rule.returnValue === 'need_replan')).toHaveLength(2);
     }
   });
 
@@ -146,11 +163,20 @@ describe('shipped development completion and remediation routes', () => {
     }
   });
 
-  it.each(variants(['development-core']))('$language routes an implementation workflow ABORT result to replan for final planning judgment', ({ language, name }) => {
+  it.each(variants(['development-core']))('$language routes implementation workflow results through the planning handoffs', async ({ language, name }) => {
     const config = load(language, name);
-    const implementation = config.steps.find(step => step.name === 'implement');
-    const abortRule = implementation?.rules?.find(rule => rule.condition.kind === 'semantic' && rule.condition.label === 'ABORT');
-    expect(abortRule?.next).toBe('replan');
+    start(config, 'implement');
+    expect((await execute(config, 'implement', 0)).nextStep).toBe('peer-review');
+    start(config, 'implement');
+    expect((await execute(config, 'implement', 1)).nextStep).toBe('replan');
+    start(config, 'implement');
+    expect((await execute(config, 'implement', 2)).nextStep).toBe('replan');
+    start(config, 'replan');
+    expect((await execute(config, 'replan', 0)).nextStep).toBe('implement');
+    start(config, 'replan');
+    expect((await execute(config, 'replan', 1)).nextStep).toBe('peer-review');
+    start(config, 'replan');
+    expect((await execute(config, 'replan', 2)).nextStep).toBe('ABORT');
   });
 
   it.each(variants(remediations))('$language/$name executes plan-scoped investigation in fix and preserves the repair path', async ({ language, name }) => {
