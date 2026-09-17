@@ -165,8 +165,6 @@ const CursorProviderOptionsSchema = z.object({
 
 const DeepSeekHarnessProviderOptionsSchema = z.object({
   base_url: z.string().min(1).optional(),
-  session_root: z.string().min(1).optional(),
-  cordis: z.string().min(1).optional(),
   max_tokens: z.number().int().positive().safe().optional(),
   request_timeout_ms: z.number().int().positive().safe().max(2_147_483_647).optional(),
   shutdown_timeout_ms: z.number().int().positive().safe().max(2_147_483_647).optional(),
@@ -674,8 +672,6 @@ const NormalizedStepProviderOptionsSchema = z.object({
   }).strict().optional(),
   deepseekHarness: z.object({
     baseUrl: z.string().min(1).optional(),
-    sessionRoot: z.string().min(1).optional(),
-    cordis: z.string().min(1).optional(),
     maxTokens: z.number().int().positive().safe().optional(),
     requestTimeoutMs: z.number().int().positive().safe().max(2_147_483_647).optional(),
     shutdownTimeoutMs: z.number().int().positive().safe().max(2_147_483_647).optional(),

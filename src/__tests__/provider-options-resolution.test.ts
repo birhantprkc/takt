@@ -59,6 +59,39 @@ describe('resolveEffectiveProviderOptions', () => {
     });
   });
 
+  it('preserves all supported DeepSeek options through effective resolution', () => {
+    expect(resolveEffectiveProviderOptions(
+      'project',
+      undefined,
+      {
+        deepseekHarness: {
+          baseUrl: 'https://config.example.test',
+          maxTokens: 1024,
+          requestTimeoutMs: 1000,
+          shutdownTimeoutMs: 2000,
+          runtimeMode: 'exe',
+        },
+      },
+      {
+        deepseekHarness: {
+          baseUrl: 'https://step.example.test',
+          maxTokens: 2048,
+          requestTimeoutMs: 3000,
+          shutdownTimeoutMs: 4000,
+          runtimeMode: 'node',
+        },
+      },
+    )).toEqual({
+      deepseekHarness: {
+        baseUrl: 'https://step.example.test',
+        maxTokens: 2048,
+        requestTimeoutMs: 3000,
+        shutdownTimeoutMs: 4000,
+        runtimeMode: 'node',
+      },
+    });
+  });
+
   it('resolves Pi thinkingLevel by existing step/persona/config precedence without losing resource options', () => {
     const configOptions = asProviderOptions({
       pi: { thinkingLevel: 'medium', noSkills: true },
@@ -956,8 +989,6 @@ describe('providerOptionsContract', () => {
       'provider_options.kiro.guards.call_timeout_ms',
       'provider_options.cursor.guards.call_timeout_ms',
       'provider_options.deepseek_harness.base_url',
-      'provider_options.deepseek_harness.session_root',
-      'provider_options.deepseek_harness.cordis',
       'provider_options.deepseek_harness.max_tokens',
       'provider_options.deepseek_harness.request_timeout_ms',
       'provider_options.deepseek_harness.shutdown_timeout_ms',

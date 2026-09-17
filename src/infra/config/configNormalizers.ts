@@ -663,6 +663,7 @@ export function buildRawTaktProvidersOrThrow(
   };
 }
 
+/** Serialize supported internal provider options to YAML keys, omitting unspecified values. */
 export function denormalizeProviderOptions(
   providerOptions: StepProviderOptions | undefined,
 ): Record<string, unknown> | undefined {
@@ -819,12 +820,6 @@ export function denormalizeProviderOptions(
     const deepseekHarness = {
       ...(providerOptions.deepseekHarness.baseUrl !== undefined
         ? { base_url: providerOptions.deepseekHarness.baseUrl }
-        : {}),
-      ...(providerOptions.deepseekHarness.sessionRoot !== undefined
-        ? { session_root: providerOptions.deepseekHarness.sessionRoot }
-        : {}),
-      ...(providerOptions.deepseekHarness.cordis !== undefined
-        ? { cordis: providerOptions.deepseekHarness.cordis }
         : {}),
       ...(providerOptions.deepseekHarness.maxTokens !== undefined
         ? { max_tokens: providerOptions.deepseekHarness.maxTokens }
