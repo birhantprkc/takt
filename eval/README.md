@@ -117,6 +117,124 @@ implementation/evidence gaps separate from omitted family paths and excludes a
 neighboring contract. Invoke it with
 `npm run eval:prompts:fix-verifier-family-boundary`.
 
+The `instruction-research-handoff` suite evaluates the instruction-summary,
+plan, report, and routing boundaries from the instruction-research handoff
+regression. It contains ten fixed cases (five summary cases and five
+downstream cases), uses the production prompt builders, and runs the four
+model matrix from `fix-verifier-model-matrix`: Claude Opus 5, Codex Sol High,
+Codex Luna Max, and Kimi K3. The semantic rubric is judged by Codex Luna Max;
+the generator receives only the role-separated case history and the isolated
+fixture, while the judge receives the rubric and fixture evidence separately.
+Run a fresh baseline and then a candidate comparison with:
+
+```sh
+node eval/scripts/instruction-research-handoff-eval.mjs baseline \
+  .tmp/instruction-research-handoff-baseline \
+  --skip-provider kimi-k3
+node eval/scripts/instruction-research-handoff-eval.mjs candidate \
+  .tmp/instruction-research-handoff-baseline \
+  .tmp/instruction-research-handoff-candidate \
+  --skip-provider kimi-k3
+```
+
+If a confirmed provider outage prevents one matrix member from running, pass
+its exact matrix ID, for example `--skip-provider kimi-k3`. The manifest keeps
+the skipped provider as infrastructure failure and does not substitute
+another model. The same skip flag must be supplied to both baseline and
+candidate; omit it from both commands when that provider is available. A
+candidate still must complete every active provider/case row. Exit status is
+calculated from active rows: `0` means the selected active subset completed,
+`1` means an active candidate row failed its model assertion, and `2` means
+an active provider or grader failed or a row was unexecuted. Skipped rows stay
+visible as infrastructure failures in the manifest and summary, so exit `0`
+does not mean that all four matrix providers ran. At least one provider must
+remain active. A candidate-sourced `rescore` uses the same candidate failure
+status; a baseline-sourced `rescore` preserves baseline REDs and only fails for
+active infrastructure or unexecuted rows. Use `rescore` when only the rubric
+or judge needs to change:
+
+```sh
+node eval/scripts/instruction-research-handoff-eval.mjs rescore \
+  .tmp/instruction-research-handoff-baseline \
+  .tmp/instruction-research-handoff-rescored
+```
+
+Rescoring reuses the saved source prompts and raw model outputs. It rejects
+changed case input, prompt, or fixture hashes; the fixture manifest records
+each file hash and an aggregate hash. `manifestHash` is the SHA-256 of the
+canonical manifest JSON, while `rescoredFromManifestFileSha256` is the SHA-256
+of the saved manifest file bytes. Results separate model failures from provider
+or grader failures and unexecuted rows. These are fixed-input prompt
+regressions with stochastic model output, not end-to-end product correctness;
+repeat runs and inspect the saved evidence before making convergence claims.
+
+When the opencode Kimi route is unavailable, the saved baseline and candidate
+artifacts can be supplemented with the installed Kimi Code CLI route. This
+does not regenerate or rescore the other three-provider rows (30 rows per
+phase, 60 rows across baseline and candidate). The runner validates the source
+cases, fixture, prompts, rubrics, and saved row hashes before it executes ten
+baseline prompts and then ten candidate prompts:
+
+```sh
+node eval/scripts/instruction-research-handoff-kimi-cli.mjs run \
+  .tmp/instruction-research-handoff-baseline-rescored-final-v2 \
+  .tmp/instruction-research-handoff-candidate-rescored-final \
+  .tmp/instruction-research-handoff-kimi-code-cli-k3 \
+  --route-provenance "$TAKT_KIMI_ROUTE_PROVENANCE"
+```
+
+The supplemental provider ID is `kimi-code-cli-k3`, labelled
+`KimiCodeCLI K3/high補足`. Its CLI invocation uses the installed
+`kimi-code/k3` alias, an empty skills directory, and prompt mode (`-p`).
+Set `TAKT_EVAL_KIMI_BIN` when the executable is not available as `kimi` on
+`PATH` (for example, `TAKT_EVAL_KIMI_BIN=$HOME/.kimi-code/bin/kimi`).
+Kimi Code CLI 0.43.1 rejects `--auto` together with `-p`, so the manifest
+records that the `--auto` flag was omitted and why. The route provenance must
+show CLI 0.43.1, model `k3`, alias `kimi-code/k3`, effort `high`, and the
+managed endpoint when the optional route probe is supplied. Without that
+probe, the endpoint is recorded as `unknown`; each run still records per-case
+`system.version`, session list, and `agents/main/wire.jsonl` evidence without
+copying logs or credentials.
+
+`--route-provenance` optionally points to a private preflight artifact from an
+authenticated Kimi Code CLI health probe. When supplied, the runner verifies
+its model and managed-endpoint evidence and stores its hash, but does not
+create or publish that artifact. Keep it outside the repository and pass a new
+path when reproducing the run. Omitting the option is supported when no
+preflight artifact is available.
+
+To generate only the candidate phase (ten prompts and ten rows), add
+`--candidate-only` to the `run` command. The baseline source argument remains
+required for a consistent command shape, but is not read or executed:
+
+```sh
+node eval/scripts/instruction-research-handoff-kimi-cli.mjs run \
+  .tmp/instruction-research-handoff-baseline-rescored-final-v2 \
+  .tmp/instruction-research-handoff-candidate-rescored-final \
+  .tmp/instruction-research-handoff-kimi-code-cli-k3-candidate \
+  --candidate-only
+```
+
+The output stores private raw streams in
+`raw/<baseline|candidate>/<caseId>.stdout` (mode 600), promptfoo results,
+ten or twenty scored rows depending on the phase selection,
+`provenance.json`, and `summary.json`. If only the semantic judge needs
+another attempt, replay the saved answers without invoking Kimi:
+
+```sh
+node eval/scripts/instruction-research-handoff-kimi-cli.mjs rescore \
+  .tmp/instruction-research-handoff-kimi-code-cli-k3 \
+  .tmp/instruction-research-handoff-kimi-code-cli-k3-rescored \
+  --route-provenance "$TAKT_KIMI_ROUTE_PROVENANCE"
+```
+
+The output manifest and summary also retain source status counts for every
+original provider and phase, including skipped and incomplete rows. A passing
+Kimi supplement describes the Kimi rows only; it does not mean that the
+four-provider matrix is complete.
+`sourceStatus` summarizes the loaded source rows and does not detect edits to
+the rows' full contents.
+
 The `fix-plan-cause-check` suite uses the same three providers and one-at-a-time
 execution. It checks that a planner does not treat failure during parallel
 execution as proof that serial execution is the fix. Invoke it explicitly with
