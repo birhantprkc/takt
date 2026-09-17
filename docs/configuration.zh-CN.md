@@ -1036,7 +1036,7 @@ provider_options:
 
 在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的所有 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 仍然只过滤 builtin tool，而 `allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
 
-未指定 permission mode 时，显式 `allowedTools` 列表仍决定允许范围；配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
+未指定 permission mode 时，显式 `allowedTools` 列表也会经过 tool 来源验证。自动发现的 extension tool 即使列在 `allowedTools` 中也会被排除；要启用 extension tool，必须在 `extensions` 中明确配置其来源，并在 `allowedTools` 中列出 tool 名称。配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
 
 <a id="workflow-categories"></a>
 
