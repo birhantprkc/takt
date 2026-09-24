@@ -6,6 +6,27 @@
 
 フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に基づいています。
 
+## [0.66.1] - 2026-09-24
+
+### Added
+
+- Codex provider が `permission_control: codex` のとき、`provider_options.codex.config_profile` で名前付き設定プロファイルを選択できるようになりました (#1539, #1583)。TAKT は Codex の TOML を読み込まず、名前を `codex exec --profile <name>` として渡し、Codex が `$CODEX_HOME/<name>.config.toml` から解決します。名前には ASCII の英字・数字・ハイフン・アンダースコアだけを使えます。`permission_control: codex` なしで指定すると設定エラーになります。`TAKT_PROVIDER_OPTIONS_CODEX_CONFIG_PROFILE` でも設定できます。
+- DeepSeek Harness の推論強度を、`runtime.yaml` の provider profile の `options.reasoning_effort`（`off`・`low`・`high`・`max`）または `TAKT_PROVIDER_OPTIONS_DEEPSEEK_HARNESS_REASONING_EFFORT` で指定できるようになりました (#1492, #1588)。未指定時は SDK の既定値を使います。変更や指定解除は、session ID と履歴を保ったまま次の turn から適用されます。`config.yaml` の `provider_options`、workflow の step、persona からは指定できません。
+
+### Changed
+
+- 通常 step と parallel sub-step の provider error を、新しいセッションで 1 回だけ再実行するようになりました (#1582)。ストリームの解析エラー（`provider_stream_parse_error`）も再実行の対象になり、parallel review の 1 体が失敗しても、他のレビュー結果を保ったまま run 全体が abort しなくなります。ユーザーの中断や外部 timeout による失敗、rate limit は再実行しません。
+- ビルトインのフロントエンド指針を、新しい `gui` の knowledge と policy を軸に整理しました (#1592)。`gui` は Root からの画面の階層、ユーザー操作を上位へ通知する表示部品、状態を持ち操作の受理・処理・次の表示を判断する部品を扱います。`frontend` はこれを継承して URL・HTML・通信・アクセシビリティを扱い、React の knowledge と policy はこれらの役割を React で実現する方法を示します。
+
+### Fixed
+
+- 外部ファセットプールのファセットが、同じディレクトリの親を `{extends:...}` で継承できるようになりました (#1592)。symlink の親ファイルやディレクトリ外への参照は拒否します。
+- Codex SDK を 0.156.1 に更新し、ChatGPT 認証で `gpt-6-luna` と reasoning effort `max` を指定したときに 400 エラーにならないようにしました (#1597)。
+
+### Internal
+
+- parallel の再ラウンドでファセットを選び直すテストを、セレクタの呼び出し順に依存しないようにしました (#1599)。
+
 ## [0.66.0] - 2026-09-18
 
 ### Added
@@ -38,7 +59,6 @@
 
 ### Added
 
-- Codex provider が `permission_control: codex` のとき、`provider_options.codex.config_profile` で名前付き設定プロファイルを選択できるようになりました (#1539)。TAKT は Codex の TOML を読み込まず、名前を `codex exec --profile <name>` として渡します。
 - 実行中の worktree clone タスクへのライブ介入 (#1531, #1545)。`takt list` で実行中タスクを選ぶと状態別のアクションメニューが表示され、新しい **Interactive** を選ぶと、そのタスクを `/tell` の初期対象にした通常の assistant 会話が開きます。新しい `/tell [instruction]` コマンドは実行中の worktree clone タスクを選択し、タスク名・ワークフロー・現在のステップ・追加指示を表示して、確認後に `.takt/runs/<slug>/interventions.jsonl` へ指示を記録します。実行中のエンジンは run を止めずに、次のステップ境界（`arpeggio` ステップでは次のバッチ境界）で保留中の指示を配信します。指示を省略した場合は会話全体を独立した指示本文へ変換します。対象は確認後に再検証されるため、完了した・clone がない・差し替えられたタスクには何も送られません。対話型ターミナルが必要です。
 - MCP のタスク状態ツール (#1545)。`takt-mcp` に `takt_list_tasks`（ログ・レポート本文を含まないタスク/run の要約）、`takt_get_run`（1つの run の現在のステップ・フェーズ・ログ・レポート・ライブ介入の配信状態）、`takt_tell_run`（実行中の worktree clone タスク1件へ再検証のうえ追加指示を送信）が追加されました。`takt-mcp --tool-set read-only` は読み取り2ツールだけを公開します。通常の `takt` assistant 会話は provider が MCP をサポートする場合にこの読み取り専用セットを自動で使い、タスクや run の状態について答えられます。MCP 非対応の provider では会話は継続し、タスク状態の参照が利用できない旨を報告します。
 
