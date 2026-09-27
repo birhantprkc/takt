@@ -300,6 +300,11 @@ class DeepSeekHarness:
             self.stale_stderr_release.set()
             if not self.stale_stderr_emitted.wait(1):
                 raise RuntimeError('pre-existing stderr worker did not emit')
+        if input == 'stale-turn-failure-safe-stderr':
+            self.stale_stderr_prior = True
+            self.stale_stderr_release.set()
+            if not self.stale_stderr_emitted.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not emit')
         if input == 'stale-turn-failure-prior-stderr':
             self.stale_stderr_armed.clear()
             self.stale_stderr_emitted.clear()
@@ -380,7 +385,7 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
-        if input in ('stale-turn-failure', 'stale-turn-failure-no-stderr', 'stale-turn-failure-prior-stderr'):
+        if input in ('stale-turn-failure', 'stale-turn-failure-safe-stderr', 'stale-turn-failure-no-stderr', 'stale-turn-failure-prior-stderr'):
             finish_reason = 'error'
             failure_error = {
                 'code': 'ECONNREFUSED',
@@ -1318,7 +1323,38 @@ sys.implementation = types.SimpleNamespace(
       .toHaveLength(1);
   });
 
-  it('does not attribute a previously noisy worker’s safe-shaped stderr to the next failure', async () => {
+  it('rejects safe-shaped stderr from a previously silent, unowned SDK worker', async () => {
+    const options = {
+      cwd: root, model: 'stale-turn-stderr', sessionId: 'silent-worker-session',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    };
+    const logger = createProviderEventLogger({ logsDir: root, sessionId: options.sessionId, runId: 'silent-worker', enabled: true });
+    const first = await callDeepSeekHarness('worker', 'stale-turn-success', options);
+    const events: unknown[] = [];
+    const second = await callDeepSeekHarness('worker', 'stale-turn-failure-safe-stderr', {
+      ...options, onStream: (event) => {
+        events.push(event);
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: options.model, step: 'failure' }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'silent-worker.md'), workflowName: 'diagnostic', task: 'silent-worker',
+      runSlug: 'silent-worker', status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{ type: 'step_complete', step: 'failure', persona: 'worker', iteration: 1,
+      status: second.status, content: second.content, instruction: 'stale-turn-failure-safe-stderr',
+      timestamp: '2026-09-24T12:00:00.000Z' }], [], 'full');
+
+    expect(first).toMatchObject({ status: 'done', sessionId: options.sessionId });
+    expect(second).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    for (const surface of [JSON.stringify(second), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).not.toContain('ECONNRESET');
+    }
+    expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
+      .trim().split('\n')).toHaveLength(1);
+  });
+
+  it('replaces a bridge after an unowned worker emits safe-shaped stderr', async () => {
     const options = {
       cwd: root,
       model: 'stale-turn-stderr',
@@ -1342,7 +1378,7 @@ sys.implementation = types.SimpleNamespace(
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim()
       .split('\n'))
-      .toHaveLength(1);
+      .toHaveLength(2);
   });
 
   it('keeps the same worker actionable on a later turn without stderr', async () => {

@@ -139,6 +139,10 @@ def _stderr_request_id() -> str | None:
     previous_request_id = _previous_thread_stderr_request_ids.get(thread)
     if previous_request_id is not None:
         return previous_request_id
+    # A worker that already existed when this request began has no proven
+    # owner. Never label its first stderr write as belonging to this request.
+    if thread in _request_start_threads:
+        return None
     if _current_stderr_request_id is not None:
         _current_stderr_threads.add(thread)
         return _current_stderr_request_id
