@@ -43,7 +43,7 @@ import type {
 import { DEEPSEEK_HARNESS_DEFAULT_CREDENTIAL_REFERENCE, DEEPSEEK_HARNESS_DEFAULT_MODEL } from './constants.js';
 import { getDeepSeekHarnessManagedPaths } from './managed-venv.js';
 import { assertSupportedDeepSeekHarnessPlatform } from './platform.js';
-import { validateDeepSeekHarnessRuntime } from './runtime.js';
+import { safeRuntimeValidationFailure, validateDeepSeekHarnessRuntime } from './runtime.js';
 import { parseDeepSeekHarnessModelReference } from './model-reference.js';
 import { type DeepSeekCredentialHomeOrigin } from './credential-home.js';
 import { resolveConfiguredDeepSeekEndpoint } from './endpoint-consistency.js';
@@ -1183,9 +1183,13 @@ class DeepSeekHarnessProcess {
       ) {
         throw error;
       }
+      const safeCause = safeRuntimeValidationFailure(error);
       throw new Error(
-        `Unable to start DeepSeek Harness Python bridge: managed SDK validation failed. `
-        + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}. Upstream error details are withheld.`,
+        `Unable to start DeepSeek Harness Python bridge: `
+        + (safeCause === undefined
+          ? 'managed SDK validation failed. Upstream error details are withheld.'
+          : `${safeCause}.`)
+        + ` ${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}.`,
         { cause: error },
       );
     }

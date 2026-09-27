@@ -1953,9 +1953,9 @@ describe.skipIf(!fakePythonAvailable)('DeepSeek Harness managed provider startup
     ['runtime version mismatch', { runtimeVersion: '999.0.0' }, /managed DeepSeek Harness runtime version .* does not match/iu],
     ['SDK Requires-Python mismatch', { requiresPython: '>=3.13,<3.14' }, /SDK Requires-Python .* does not allow CPython 3\.12/iu],
     ['Python version mismatch', { pythonVersion: '3.13.0' }, /managed interpreter must be CPython 3\.12.*found/iu],
-    ['constructor incompatibility', { constructorCompatible: false }, /constructor signature is incompatible/iu],
+    ['constructor incompatibility', { constructorCompatible: false }, /managed SDK validation failed.*Upstream error details are withheld/iu],
     ['broken interpreter', undefined, /managed interpreter probe exited with status 17/iu],
-  ] as const)('returns a cause-specific startup error for %s without starting the bridge', async (name, runtimeOptions, message) => {
+  ] as const)('returns a safe startup error for %s without starting the bridge', async (name, runtimeOptions, message) => {
     const fixture = await prepareProviderFixture(runtimeOptions ?? {});
     if (name === 'broken interpreter') {
       await writeFile(fixture.runtimePythonPath, '#!/bin/sh\nexit 17\n', 'utf8');
@@ -1983,6 +1983,31 @@ describe.skipIf(!fakePythonAvailable)('DeepSeek Harness managed provider startup
     })).toEqual(before);
     expect(existsSync(fixture.bridgeStartedMarker)).toBe(false);
     expect(existsSync(fixture.uvLogPath)).toBe(false);
+  });
+
+  it('does not retain an unknown store-only value from SDK metadata in a startup error', async () => {
+    const secret = 'store-only-probe-version-secret';
+    const fixture = await prepareProviderFixture({ sdkVersion: secret });
+    let validationError: unknown;
+    try {
+      await validateDeepSeekHarnessRuntime(
+        fixture.runtimePythonPath, fixture.environmentDir, fixture.dshHomeDir,
+      );
+    } catch (error) {
+      validationError = error;
+    }
+    expect(validationError).toBeInstanceOf(Error);
+    expect(String(validationError)).toMatch(/managed DeepSeek Harness SDK version \[REDACTED\] does not match/iu);
+    expect(String(validationError)).not.toContain(secret);
+    const response = await callDeepSeekHarness('worker', 'hello', {
+      cwd: fixture.projectDir,
+      childProcessEnv: { PATH: '' },
+    });
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(/managed DeepSeek Harness SDK version \[REDACTED\] does not match/iu);
+    expect(JSON.stringify(response)).not.toContain(secret);
+    expect(existsSync(fixture.bridgeStartedMarker)).toBe(false);
   });
 
   it('preserves safe text and thinking event types with response redaction enabled', async () => {
