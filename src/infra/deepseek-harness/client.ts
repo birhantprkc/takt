@@ -57,8 +57,11 @@ import {
 } from './credential-patch.js';
 import {
   buildCredentialDiagnostic,
+  buildDeepSeekRuntimeFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
+  classifyDeepSeekRuntimeFailure,
   DeepSeekCredentialDiagnosticError,
+  type DeepSeekRuntimeFailureEvidence,
   type DeepSeekCredentialFailureClassification,
 } from './credential-diagnostics.js';
 import {
@@ -88,6 +91,7 @@ interface BridgeResultPayload {
   sessionId?: unknown;
   finalResponse?: unknown;
   finishReason?: unknown;
+  sessionReusable?: unknown;
 }
 
 interface BridgeNotificationPayload {
@@ -100,6 +104,7 @@ interface BridgeMessage {
   requestId?: unknown;
   result?: unknown;
   error?: BridgeErrorPayload;
+  stderr?: unknown;
   notification?: BridgeNotificationPayload;
 }
 
@@ -131,6 +136,10 @@ interface HarnessStreamState {
   emittedToolResults: Set<string>;
   finishReason?: string;
   failureReason?: string;
+  failureCode?: string;
+  failureMessage?: string;
+  stderrPresent: boolean;
+  stderrObservationComplete: boolean;
 }
 
 class DeepSeekHarnessProtocolError extends Error {
@@ -144,6 +153,7 @@ class DeepSeekHarnessTransportError extends Error {
   constructor(
     message: string,
     readonly bridgeCode?: string,
+    readonly bridgeMessage?: string,
   ) {
     super(message);
     this.name = 'DeepSeekHarnessTransportError';
@@ -168,7 +178,11 @@ class DeepSeekHarnessTurnEndError extends Error {
 }
 
 class DeepSeekHarnessProviderError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly providerCode?: string,
+    readonly providerMessage?: string,
+  ) {
     super(message);
     this.name = 'DeepSeekHarnessProviderError';
   }
@@ -506,7 +520,10 @@ function safeMessage(value: unknown, knownSecrets: Record<string, string>): stri
   return `${Buffer.from(sanitized).subarray(0, DEEPSEEK_HARNESS_MAX_ERROR_BYTES).toString('utf8')}...`;
 }
 
-function bridgeError(error: BridgeErrorPayload | undefined, knownSecrets: Record<string, string>): Error {
+function bridgeError(
+  error: BridgeErrorPayload | undefined,
+  knownSecrets: Record<string, string>,
+): Error {
   const code = typeof error?.code === 'string'
     ? safeMessage(new Error(error.code), knownSecrets)
     : 'runtime-error';
@@ -518,9 +535,10 @@ function bridgeError(error: BridgeErrorPayload | undefined, knownSecrets: Record
     return new DeepSeekHarnessTimeoutError(formatted);
   }
   if (code === 'malformed-response' || code === 'protocol-error') {
-    return new DeepSeekHarnessProtocolError(formatted);
+    // The SDK's protocol error body may contain a credential from its own store.
+    return new DeepSeekHarnessProtocolError('DeepSeek Harness bridge returned a protocol error');
   }
-  return new DeepSeekHarnessTransportError(formatted, code);
+  return new DeepSeekHarnessTransportError(formatted, code, message);
 }
 
 function isRuntimeSetupFailure(error: unknown, diagnostic: string): boolean {
@@ -861,6 +879,12 @@ function recordFailureReason(state: HarnessStreamState, reason: Record<string, u
   if (isRecord(reasonError)) {
     const message = typeof reasonError.message === 'string' ? reasonError.message : undefined;
     const code = typeof reasonError.code === 'string' ? reasonError.code : undefined;
+    if (code !== undefined) {
+      state.failureCode = code;
+    }
+    if (message !== undefined) {
+      state.failureMessage = message;
+    }
     if (message !== undefined && code !== undefined) {
       state.failureReason = `${code}: ${message}`;
       return;
@@ -871,6 +895,7 @@ function recordFailureReason(state: HarnessStreamState, reason: Record<string, u
     }
   }
   if (typeof reason.message === 'string') {
+    state.failureMessage = reason.message;
     state.failureReason = reason.message;
   }
 }
@@ -1066,6 +1091,11 @@ class DeepSeekHarnessProcess {
   private terminationPromise: Promise<void> | undefined;
   private readonly stderrRedactor = createSensitiveTextStreamRedactor();
   private stderr = '';
+  private stderrObservationVersion = 0;
+  private processDrainComplete = false;
+  private sessionReuseBlocked = false;
+  private activeTurnRequestId: string | undefined;
+  private activeTurnState: HarnessStreamState | undefined;
   private operationTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -1086,6 +1116,10 @@ class DeepSeekHarnessProcess {
 
   get knownSecrets(): Record<string, string> {
     return this.environment.knownSecrets;
+  }
+
+  get canReuse(): boolean {
+    return !this.closed && !this.sessionReuseBlocked;
   }
 
   /** Await the current operation tail, including failures, before replacing this bridge. */
@@ -1233,6 +1267,13 @@ class DeepSeekHarnessProcess {
     child.stderr?.on('error', onStreamError);
     child.stderr?.on('data', (chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      if (text.length > 0) {
+        this.stderrObservationVersion += 1;
+        this.sessionReuseBlocked = true;
+        if (this.activeTurnState !== undefined) {
+          this.activeTurnState.stderrPresent = true;
+        }
+      }
       this.appendStderr(this.stderrRedactor.write(text, this.knownSecrets));
     });
     void this.managed?.wait().then(
@@ -1292,6 +1333,24 @@ class DeepSeekHarnessProcess {
 
     try {
       const kind = message.kind;
+      if (kind === 'stderr') {
+        const text = requireString(message.stderr, 'bridge stderr');
+        const requestId = message.requestId === null || message.requestId === undefined
+          ? undefined
+          : requireString(message.requestId, 'bridge stderr requestId');
+        const attributedToActiveTurn = requestId !== undefined && requestId === this.activeTurnRequestId;
+        if (text.length > 0) {
+          this.stderrObservationVersion += 1;
+          if (!attributedToActiveTurn) {
+            this.sessionReuseBlocked = true;
+          }
+          if (this.activeTurnState !== undefined) {
+            this.activeTurnState.stderrPresent = true;
+          }
+        }
+        this.appendStderr(this.stderrRedactor.write(text, this.knownSecrets));
+        return;
+      }
       if (kind === 'notification') {
         const requestId = requireString(message.requestId, 'notification requestId');
         const pending = this.pending.get(requestId);
@@ -1477,6 +1536,36 @@ class DeepSeekHarnessProcess {
     });
   }
 
+  private async observeFailureStderr(
+    state: HarnessStreamState,
+    observationStart: number,
+  ): Promise<void> {
+    try {
+      state.stderrObservationComplete = await this.close();
+    } catch {
+      state.stderrObservationComplete = false;
+    }
+    state.stderrPresent ||= this.stderrObservationVersion !== observationStart;
+  }
+
+  private beginTurnStderrObservation(requestId: string, state: HarnessStreamState): void {
+    this.activeTurnRequestId = requestId;
+    this.activeTurnState = state;
+  }
+
+  private endTurnStderrObservation(
+    requestId: string | undefined,
+    state: HarnessStreamState,
+  ): void {
+    if (
+      this.activeTurnState === state
+      && (requestId === undefined || this.activeTurnRequestId === requestId)
+    ) {
+      this.activeTurnRequestId = undefined;
+      this.activeTurnState = undefined;
+    }
+  }
+
   async run(
     prompt: string,
     sessionId: string | undefined,
@@ -1491,12 +1580,19 @@ class DeepSeekHarnessProcess {
     });
     this.operationTail = previous.then(() => gate);
     let activityStarted = false;
+    let failureObservationAttempted = false;
+    let turnStderrObservationStart: number | undefined;
+    let turnRequestId: string | undefined;
     try {
       await waitForAbortable(previous, abortSignal);
+      turnStderrObservationStart = this.stderrObservationVersion;
       this.refForActivity();
       activityStarted = true;
+      this.activeTurnState = state;
       await this.start(abortSignal);
       const requestId = this.nextRequestId();
+      turnRequestId = requestId;
+      this.beginTurnStderrObservation(requestId, state);
       const raw = await this.request(
         {
           type: 'run',
@@ -1516,6 +1612,9 @@ class DeepSeekHarnessProcess {
         abortSignal,
       );
       const result = requireRecord(raw, 'run result') as BridgeResultPayload;
+      if (result.sessionReusable !== true) {
+        this.sessionReuseBlocked = true;
+      }
       const activeSessionId = requireString(result.sessionId, 'run result sessionId');
       assertSafeSessionId(activeSessionId);
       assertOpaqueSessionId(activeSessionId, this.knownSecrets);
@@ -1533,11 +1632,32 @@ class DeepSeekHarnessProcess {
           'DeepSeek Harness run result finishReason did not match the root session turn/end event',
         );
       }
+      if (finishReason === 'error' && turnStderrObservationStart !== undefined) {
+        failureObservationAttempted = true;
+        await this.observeFailureStderr(state, turnStderrObservationStart);
+      } else if (turnStderrObservationStart !== undefined) {
+        state.stderrPresent ||= this.stderrObservationVersion !== turnStderrObservationStart;
+      }
       return { sessionId: activeSessionId, finalResponse, finishReason };
+    } catch (error) {
+      if (
+        turnStderrObservationStart !== undefined
+        && (
+          error instanceof DeepSeekHarnessTransportError
+          || error instanceof DeepSeekHarnessProviderError
+        )
+      ) {
+        failureObservationAttempted = true;
+        await this.observeFailureStderr(state, turnStderrObservationStart);
+      }
+      throw error;
     } finally {
       try {
+        this.endTurnStderrObservation(turnRequestId, state);
         if (activityStarted) {
-          if (sessionId === undefined) {
+          if (sessionId === undefined && !failureObservationAttempted) {
+            await this.close();
+          } else if (!this.canReuse) {
             await this.close();
           } else {
             this.unrefForIdle();
@@ -1549,13 +1669,58 @@ class DeepSeekHarnessProcess {
     }
   }
 
-  async close(): Promise<void> {
+  private async waitForManagedClose(): Promise<boolean> {
+    const managed = this.managed;
+    if (managed === undefined) {
+      if (this.terminationPromise !== undefined) {
+        try {
+          await this.terminationPromise;
+        } catch {
+          return false;
+        }
+      }
+      return this.processDrainComplete;
+    }
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(false);
+      }, this.configuration.shutdownTimeoutMs);
+      timer.unref?.();
+      void managed.wait().then(
+        () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(true);
+        },
+        () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(false);
+        },
+      );
+    });
+  }
+
+  async close(): Promise<boolean> {
     this.refForActivity();
     if (this.closed) {
+      const processDrained = await this.waitForManagedClose();
       await this.terminate();
-      return;
+      return processDrained;
     }
     this.closing = true;
+    let processDrained = true;
     try {
       if (this.ready) {
         const requestId = this.nextRequestId();
@@ -1568,12 +1733,15 @@ class DeepSeekHarnessProcess {
           undefined,
           this.configuration.shutdownTimeoutMs,
         );
+        processDrained = await this.waitForManagedClose();
       }
     } catch {
       // Termination below owns cleanup when the SDK cannot answer shutdown.
+      processDrained = false;
     } finally {
       await this.terminate();
     }
+    return processDrained;
   }
 
   private terminate(): Promise<void> {
@@ -1605,8 +1773,14 @@ class DeepSeekHarnessProcess {
       if (managed !== undefined) {
         try {
           await managed.terminate();
+          this.processDrainComplete = true;
         } catch {
-          await managed.wait().catch(() => undefined);
+          try {
+            await managed.wait();
+            this.processDrainComplete = true;
+          } catch {
+            // The stderr observation remains incomplete when the process cannot be drained.
+          }
         }
       }
     } finally {
@@ -1737,11 +1911,13 @@ async function getOrCreateProcess(
     : `${baseKey}:session:${JSON.stringify(options.sessionId)}`;
   if (options.sessionId !== undefined) {
     const existing = processes.get(key);
-    if (existing !== undefined && !existing.isClosed) {
+    if (existing !== undefined && existing.canReuse) {
       return existing;
     }
     if (existing !== undefined) {
+      await waitForAbortable(existing.waitForIdle(), options.abortSignal);
       removeProcess(existing);
+      await existing.close();
     }
     const existingBinding = sessionBindings.get(options.sessionId);
     if (existingBinding !== undefined && existingBinding.processKey !== key) {
@@ -1805,11 +1981,65 @@ function credentialDiagnosticDetail(
   }));
 }
 
+function hasSafeRuntimeFailureEvidence(
+  evidence: DeepSeekRuntimeFailureEvidence,
+  knownSecrets: Record<string, string>,
+): boolean {
+  const { code, message } = evidence;
+  if (
+    code === undefined
+    || message === undefined
+    || code.length === 0
+    || message.length === 0
+    || Buffer.byteLength(message, 'utf8') > DEEPSEEK_HARNESS_MAX_ERROR_BYTES
+    || sanitizeTerminalText(code) !== code
+    || sanitizeTerminalText(message) !== message
+  ) {
+    return false;
+  }
+  return sanitizeSensitiveTextWithKnownValues(message, knownSecrets) === message;
+}
+
+function runtimeFailureEvidence(
+  error: DeepSeekHarnessTransportError | DeepSeekHarnessProviderError,
+): DeepSeekRuntimeFailureEvidence {
+  return error instanceof DeepSeekHarnessTransportError
+    ? { code: error.bridgeCode, message: error.bridgeMessage }
+    : { code: error.providerCode, message: error.providerMessage };
+}
+
+function knownSafeRuntimeFailureShape(
+  error: DeepSeekHarnessTransportError | DeepSeekHarnessProviderError,
+  knownSecrets: Record<string, string>,
+): boolean {
+  const evidence = runtimeFailureEvidence(error);
+  return hasSafeRuntimeFailureEvidence(evidence, knownSecrets)
+    && classifyDeepSeekRuntimeFailure(evidence) !== 'unknown';
+}
+
+function safeRuntimeFailureClassification(
+  error: DeepSeekHarnessTransportError | DeepSeekHarnessProviderError,
+  knownSecrets: Record<string, string>,
+  stderrPresent: boolean,
+  stderrObservationComplete: boolean,
+): ReturnType<typeof classifyDeepSeekRuntimeFailure> {
+  if (!stderrObservationComplete || stderrPresent) {
+    return 'unknown';
+  }
+  const evidence = runtimeFailureEvidence(error);
+  if (!hasSafeRuntimeFailureEvidence(evidence, knownSecrets)) {
+    return 'unknown';
+  }
+  return classifyDeepSeekRuntimeFailure(evidence);
+}
+
 function failureDetail(
   error: unknown,
   options: DeepSeekHarnessCallOptions,
   knownSecrets: Record<string, string>,
   credentialFailureContext: CredentialFailureContext = {},
+  stderrPresent = false,
+  stderrObservationComplete = false,
 ): AgentFailureDetail {
   if (options.abortSignal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
     const detail = classifyAbortSignalReason(options.abortSignal?.reason ?? error);
@@ -1835,8 +2065,17 @@ function failureDetail(
     }
   }
   if (error instanceof DeepSeekHarnessTransportError || error instanceof DeepSeekHarnessProviderError) {
+    const runtimeClassification = safeRuntimeFailureClassification(
+      error,
+      knownSecrets,
+      stderrPresent,
+      stderrObservationComplete,
+    );
+    if (runtimeClassification !== 'unknown') {
+      return createProviderErrorFailure(buildDeepSeekRuntimeFailureDiagnostic(runtimeClassification));
+    }
     const classification = classifyDeepSeekRuntimeCredentialFailure(getErrorMessage(error));
-    if (classification !== 'unknown') {
+    if (classification !== 'unknown' && !knownSafeRuntimeFailureShape(error, knownSecrets)) {
       const diagnostic = credentialDiagnosticDetail(classification, {}, credentialFailureContext);
       if (diagnostic !== undefined) {
         return diagnostic;
@@ -1875,7 +2114,11 @@ function emitFailure(
 
 function finishReasonFailure(state: HarnessStreamState): Error {
   const reason = state.failureReason ?? 'DeepSeek Harness turn ended with an error';
-  return new DeepSeekHarnessProviderError(reason);
+  return new DeepSeekHarnessProviderError(
+    reason,
+    state.failureCode,
+    state.failureMessage,
+  );
 }
 
 function createSuccessResponse(
@@ -1913,9 +2156,7 @@ function createSuccessResponse(
     throw new DeepSeekHarnessProtocolError('DeepSeek Harness returned no turn completion reason');
   }
   if (result.finishReason !== 'completed') {
-    throw new DeepSeekHarnessProtocolError(
-      `DeepSeek Harness returned unsupported turn completion reason "${result.finishReason}"`,
-    );
+    throw new DeepSeekHarnessProtocolError('DeepSeek Harness returned an unsupported turn completion reason');
   }
   const finalResponse = redactFinalResponse(
     state.responseRedactionContext,
@@ -1982,6 +2223,8 @@ export async function callDeepSeekHarness(
     },
     emittedToolUses: new Set(),
     emittedToolResults: new Set(),
+    stderrPresent: false,
+    stderrObservationComplete: false,
   };
   try {
     const run = async (): Promise<AgentResponse> => {
@@ -2030,7 +2273,14 @@ export async function callDeepSeekHarness(
     const knownSecrets = processRecord?.knownSecrets
       ?? resolveKnownSecretsForFailure(turnOptions.providerOptions, turnOptions.childProcessEnv);
     flushHarnessResponseRedactor(state, turnOptions.onStream, knownSecrets, true);
-    const detail = failureDetail(error, turnOptions, knownSecrets, credentialFailureContext);
+    const detail = failureDetail(
+      error,
+      turnOptions,
+      knownSecrets,
+      credentialFailureContext,
+      state.stderrPresent,
+      state.stderrObservationComplete,
+    );
     const content = formatAgentFailure(detail);
     const responseStatus = error instanceof DeepSeekHarnessTurnEndError
       ? error.responseStatus

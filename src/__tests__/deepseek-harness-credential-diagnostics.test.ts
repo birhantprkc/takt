@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildCredentialDiagnostic,
+  buildDeepSeekRuntimeFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
+  classifyDeepSeekRuntimeFailure,
   DEEPSEEK_CREDENTIAL_DIAGNOSTIC_CLASSIFICATIONS,
   type DeepSeekCredentialDiagnosticContext,
 } from '../infra/deepseek-harness/credential-diagnostics.js';
@@ -50,9 +52,74 @@ describe('DeepSeek Harness runtime credential failure classification', () => {
 
   it.each([
     ['an unrelated transport failure', 'DeepSeek Harness bridge transport closed'],
+    ['an AUTH-containing model identifier', 'SDK rejected unknown model "AUTH-model"'],
+    ['an AUTH-containing hostname', 'connect ECONNREFUSED AUTH.example:443'],
+    ['a secret-bearing AUTH-containing hostname', 'connect ECONNREFUSED AUTH.example:443 token=store-only-secret'],
     ['an empty failure', ''],
   ] as const)('keeps %s unclassified', (_label, failure) => {
     expect(classifyDeepSeekRuntimeCredentialFailure(failure)).toBe('unknown');
+  });
+});
+
+describe('DeepSeek Harness actionable runtime failure classification', () => {
+  it.each([
+    [
+      'a model reference failure',
+      { code: 'runtime-error', message: 'SDK rejected unknown model "unknown-model"' },
+      'model-reference',
+    ],
+    [
+      'a model reference containing AUTH',
+      { code: 'runtime-error', message: 'SDK rejected unknown model "AUTH-model"' },
+      'model-reference',
+    ],
+    [
+      'a connection failure',
+      { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED deepseek.example:443' },
+      'connection-failure',
+    ],
+    [
+      'a connection failure containing AUTH',
+      { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED AUTH.example:443' },
+      'connection-failure',
+    ],
+    [
+      'a runtime-internal failure',
+      { code: 'runtime-error', message: 'DeepSeek Harness runtime internal failure' },
+      'runtime-internal-failure',
+    ],
+  ] as const)('classifies %s', (_label, evidence, expected) => {
+    expect(classifyDeepSeekRuntimeFailure(evidence)).toBe(expected);
+  });
+
+  it.each([
+    ['a missing message', { code: 'runtime-error', message: undefined }],
+    ['an explicit credential rejection', { code: 'runtime-error', message: AUTH_REJECTED_FAILURE }],
+    ['a secret-bearing model message', {
+      code: 'runtime-error',
+      message: 'SDK rejected unknown model "unknown-model" api_key=store-only-secret',
+    }],
+    ['an ambiguous connection message', {
+      code: 'ECONNREFUSED',
+      message: 'connect ECONNREFUSED deepseek.example:443 token=store-only-secret',
+    }],
+    ['a mismatched connection code', {
+      code: 'ETIMEDOUT',
+      message: 'connect ECONNREFUSED deepseek.example:443',
+    }],
+  ] as const)('keeps %s unknown', (_label, evidence) => {
+    expect(classifyDeepSeekRuntimeFailure(evidence)).toBe('unknown');
+  });
+
+  it.each([
+    ['model-reference', /model.*reference/iu],
+    ['connection-failure', /endpoint|network/iu],
+    ['runtime-internal-failure', /runtime.*failure/iu],
+  ] as const)('builds an actionable diagnostic for %s', (classification, expected) => {
+    const message = buildDeepSeekRuntimeFailureDiagnostic(classification);
+
+    expect(message).toMatch(expected);
+    expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
   });
 });
 

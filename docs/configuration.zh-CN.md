@@ -919,7 +919,7 @@ install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，�
 - credential binding 由 source home、参照名和 endpoint 组成。session 存续期间改变其中任一项时，该 turn 会明确失败并提示启动新的 run，而不是静默重置会话。
 - store 更新和删除交给官方 runtime watcher；TAKT 不添加独立 watcher 或 credential cache。更新会在同一 session 的后续 turn 生效。删除的检测存在短暂延迟，runtime 可能用上次有效值再完成一个 turn；报告 credential 缺失的 turn 不会发送 HTTP 请求。
 - **注意：** 运行期间把 store 改成不合法 YAML 并不等于撤销 credential。固定版 `0.1.5rc1` 的已有 session 会继续使用上次有效值，修复文件后才在后续 turn 加载新值；启动时遇到不合法 YAML 则失败。已经发送的请求保留开始时的 Authorization，更新只影响 watcher reload 后的请求。不要把文件损坏或某个 turn 成功视为撤销或 reload 完成的证据，也不要假设写入后的下一 turn 会同步读取新值。
-- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved，不会假称已选择默认参照。未分类的 provider/transport 失败不展示上游 message 或 stderr tail；settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
+- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved，不会假称已选择默认参照。对于安全的结构化 provider/transport 失败，诊断可以区分被拒绝的 model reference、连接失败和 runtime 内部失败，并提示下一步检查。message 缺失、含糊、格式错误、包含 secret 或无法确认安全性的输入会回退到固定 runtime-failure 诊断；TAKT 不声称能够仅靠正则表达式普遍识别未知的 store-only secret，这些诊断不会包含上游 message 或 stderr tail。settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
 - TAKT 不扫描 `.env` 文件。credential 来自 store、所选参照对应的环境变量或官方 runtime 自身的解析路径。
 
 DeepSeek Harness provider 目前处于 developer preview 阶段。只有在明确接受会消耗 DeepSeek API quota 的情况下，才应运行下面的 live smoke。

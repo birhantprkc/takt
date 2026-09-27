@@ -26,6 +26,14 @@ _PROTOCOL_STRING_FIELDS = frozenset({
 })
 _BRIDGE_PROTOCOL_VERSION = 1
 
+_MAIN_THREAD = threading.current_thread()
+_current_stderr_request_id: str | None = None
+_current_request_tracks_delayed_threads = False
+_request_start_threads: set[threading.Thread] = set()
+_current_stderr_threads: set[threading.Thread] = set()
+_thread_stderr_request_ids: dict[threading.Thread, str] = {}
+_previous_thread_stderr_request_ids: dict[threading.Thread, str] = {}
+
 
 def _create_protocol_stdout() -> Any:
     stdout_fd = sys.stdout.fileno()
@@ -79,6 +87,150 @@ def _write(message: dict[str, Any]) -> None:
     with _PROTOCOL_WRITE_LOCK:
         _PROTOCOL_STDOUT.write(serialized + "\n")
         _PROTOCOL_STDOUT.flush()
+
+
+def _live_non_main_threads() -> set[threading.Thread]:
+    return {
+        thread
+        for thread in threading.enumerate()
+        if thread is not _MAIN_THREAD
+    }
+
+
+def _begin_stderr_request(request_id: str, track_delayed_threads: bool) -> None:
+    global _current_stderr_request_id, _current_request_tracks_delayed_threads
+    global _request_start_threads, _current_stderr_threads, _previous_thread_stderr_request_ids
+    live_threads = _live_non_main_threads()
+    _previous_thread_stderr_request_ids = {
+        thread: owner_request_id
+        for thread, owner_request_id in _thread_stderr_request_ids.items()
+        if thread in live_threads
+    }
+    _current_stderr_request_id = request_id
+    _current_request_tracks_delayed_threads = track_delayed_threads
+    _request_start_threads = live_threads
+    _current_stderr_threads = set()
+
+
+def _end_stderr_request(request_id: str) -> bool:
+    global _current_stderr_request_id, _current_request_tracks_delayed_threads
+    global _request_start_threads, _current_stderr_threads, _previous_thread_stderr_request_ids
+    live_threads = _live_non_main_threads()
+    has_live_request_threads = bool(live_threads - _request_start_threads)
+    if _current_request_tracks_delayed_threads:
+        owned_threads = (live_threads - _request_start_threads) | _current_stderr_threads
+        for thread in owned_threads:
+            _thread_stderr_request_ids.setdefault(thread, request_id)
+    for thread in tuple(_thread_stderr_request_ids):
+        if not thread.is_alive():
+            del _thread_stderr_request_ids[thread]
+    _current_stderr_request_id = None
+    _current_request_tracks_delayed_threads = False
+    _request_start_threads = set()
+    _current_stderr_threads = set()
+    _previous_thread_stderr_request_ids = {}
+    return not has_live_request_threads
+
+
+def _stderr_request_id() -> str | None:
+    thread = threading.current_thread()
+    if thread is _MAIN_THREAD:
+        return _current_stderr_request_id
+    if _current_stderr_request_id is not None:
+        _current_stderr_threads.add(thread)
+        return _current_stderr_request_id
+    previous_request_id = _previous_thread_stderr_request_ids.get(thread)
+    if previous_request_id is not None:
+        return previous_request_id
+    existing_request_id = _thread_stderr_request_ids.get(thread)
+    if existing_request_id is not None:
+        return existing_request_id
+    return None
+
+
+def _write_stderr(text: str) -> int:
+    if text:
+        _write({
+            "kind": "stderr",
+            "requestId": _stderr_request_id(),
+            "stderr": text,
+        })
+    return len(text)
+
+
+class _TurnAwareBinaryOutputStream:
+    def __init__(self, underlying: Any) -> None:
+        self._underlying = underlying
+
+    def write(self, value: Any) -> int:
+        data = bytes(value)
+        if data:
+            _write_stderr(data.decode("utf-8", errors="replace"))
+        return len(data)
+
+    def flush(self) -> None:
+        return None
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def fileno(self) -> int:
+        return self._underlying.fileno()
+
+    def isatty(self) -> bool:
+        return self._underlying.isatty()
+
+    @property
+    def raw(self) -> Any:
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._underlying, name)
+
+
+class _TurnAwareOutputStream:
+    def __init__(self, underlying: Any) -> None:
+        self._underlying = underlying
+        self._buffer = _TurnAwareBinaryOutputStream(underlying.buffer)
+
+    def write(self, text: str) -> int:
+        return _write_stderr(text)
+
+    def flush(self) -> None:
+        return None
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def fileno(self) -> int:
+        return self._underlying.fileno()
+
+    def isatty(self) -> bool:
+        return self._underlying.isatty()
+
+    @property
+    def encoding(self) -> str | None:
+        return self._underlying.encoding
+
+    @property
+    def errors(self) -> str | None:
+        return self._underlying.errors
+
+    @property
+    def buffer(self) -> Any:
+        return self._buffer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._underlying, name)
+
+
+def _install_turn_aware_streams() -> None:
+    if not isinstance(sys.stdout, _TurnAwareOutputStream):
+        sys.stdout = _TurnAwareOutputStream(sys.stdout)
+    if not isinstance(sys.stderr, _TurnAwareOutputStream):
+        sys.stderr = _TurnAwareOutputStream(sys.stderr)
 
 
 def _error_code(error: BaseException) -> str:
@@ -148,7 +300,7 @@ def _start_harness(config: dict[str, Any]) -> Any:
     return harness
 
 
-def _run_request(harness: Any, request: dict[str, Any], request_id: str) -> None:
+def _run_request(harness: Any, request: dict[str, Any], request_id: str) -> dict[str, Any]:
     def on_notification(notification: Any) -> None:
         _write(
             {
@@ -173,17 +325,11 @@ def _run_request(harness: Any, request: dict[str, Any], request_id: str) -> None
         }
     )
     result = session.run(request["prompt"], on_notification=on_notification)
-    _write(
-        {
-            "kind": "result",
-            "requestId": request_id,
-            "result": {
-                "sessionId": result.session_id,
-                "finalResponse": result.final_response,
-                "finishReason": result.finish_reason,
-            },
-        }
-    )
+    return {
+        "sessionId": result.session_id,
+        "finalResponse": result.final_response,
+        "finishReason": result.finish_reason,
+    }
 
 
 def _handle_request(harness: Any, request: dict[str, Any]) -> Any:
@@ -211,7 +357,17 @@ def _handle_request(harness: Any, request: dict[str, Any]) -> Any:
             )
             return harness
         try:
-            _run_request(harness, request, request_id)
+            _begin_stderr_request(request_id, track_delayed_threads=True)
+            result = _run_request(harness, request, request_id)
+            session_reusable = _end_stderr_request(request_id)
+            _write(
+                {
+                    "kind": "result",
+                    "requestId": request_id,
+                    "result": {**result, "sessionReusable": session_reusable},
+                }
+            )
+            return harness
         except BaseException as error:
             code = _error_code(error)
             _write(
@@ -224,6 +380,9 @@ def _handle_request(harness: Any, request: dict[str, Any]) -> Any:
             if code in {"transport-closed", "malformed-response"}:
                 _close_harness(harness)
                 return None
+        finally:
+            if _current_stderr_request_id == request_id:
+                _end_stderr_request(request_id)
         return harness
 
     if request_type == "close":
@@ -262,6 +421,7 @@ def _close_harness(harness: Any) -> None:
 
 def main() -> int:
     harness: Any = None
+    _install_turn_aware_streams()
     try:
         for raw_line in sys.stdin:
             if not raw_line.strip():
@@ -309,6 +469,7 @@ def main() -> int:
                         }
                     )
                     return 2
+                _begin_stderr_request(request_id, track_delayed_threads=False)
                 try:
                     if harness is not None:
                         _close_harness(harness)
@@ -324,6 +485,8 @@ def main() -> int:
                         }
                     )
                     return 2
+                finally:
+                    _end_stderr_request(request_id)
                 continue
 
             if harness is None:

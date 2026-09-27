@@ -185,6 +185,27 @@ class DeepSeekHarness:
             raise RuntimeError('SDK rejected unknown provider route "unknown-route"')
         if kwargs.get('model') == 'unknown-model':
             raise RuntimeError('SDK rejected unknown model "unknown-model"')
+        if kwargs.get('model') == 'AUTH-model':
+            raise RuntimeError('SDK rejected unknown model "AUTH-model"')
+        if kwargs.get('model') == 'transport-unsafe-stderr':
+            print('unknown-transport-stderr', file=sys.stderr, flush=True)
+            raise RuntimeError('SDK rejected unknown model "AUTH-model"')
+        self.stale_stderr_event = None
+        self.stale_stderr_stop = None
+        self.stale_stderr_thread = None
+        if kwargs.get('model') == 'stale-turn-stderr':
+            self.stale_stderr_event = threading.Event()
+            self.stale_stderr_stop = threading.Event()
+            def emit_stale_stderr():
+                while not self.stale_stderr_stop.is_set():
+                    if not self.stale_stderr_event.wait(1):
+                        continue
+                    self.stale_stderr_event.clear()
+                    if self.stale_stderr_stop.is_set():
+                        return
+                    print('stale-turn-worker-stderr', file=sys.stderr, flush=True)
+            self.stale_stderr_thread = threading.Thread(target=emit_stale_stderr, daemon=True)
+            self.stale_stderr_thread.start()
         if kwargs.get('provider') == 'not-found-route':
             raise RuntimeError('SDK provider route not found "not-found-route"')
         if kwargs.get('model') == 'enoent-model':
@@ -200,6 +221,10 @@ class DeepSeekHarness:
     def close(self):
         if self.kwargs.get('shutdown_timeout_seconds') == 0.1:
             time.sleep(30)
+        if self.stale_stderr_stop is not None:
+            self.stale_stderr_stop.set()
+            self.stale_stderr_event.set()
+            self.stale_stderr_thread.join(timeout=1)
         self.closed = True
 
     def start_session(self, session_id=None):
@@ -226,16 +251,45 @@ class DeepSeekHarness:
             raise RuntimeError(os.environ.get('DEEPSEEK_API_KEY', 'missing-secret'))
         if input == 'fail-custom-ref':
             raise RuntimeError(os.environ.get('CUSTOM_DSH_KEY', 'missing-custom-ref'))
+        if input == 'successful-turn-with-stderr':
+            print('turn-one-stderr', file=sys.stderr, flush=True)
+        if input == 'successful-turn-with-late-stderr':
+            def emit_late_stderr():
+                time.sleep(0.2)
+                print('turn-one-late-stderr', file=sys.stderr, flush=True)
+            threading.Thread(target=emit_late_stderr, daemon=True).start()
+        if input == 'successful-turn-with-late-buffer-stderr':
+            def emit_late_buffer_stderr():
+                time.sleep(0.2)
+                sys.stderr.buffer.write(b'turn-one-late-buffer-stderr\\n')
+                sys.stderr.buffer.flush()
+            threading.Thread(target=emit_late_buffer_stderr, daemon=True).start()
+        if input == 'successful-turn-with-late-raw-fd2-stderr':
+            def emit_late_raw_fd2_stderr():
+                time.sleep(0.2)
+                os.write(sys.stderr.fileno(), b'turn-one-late-raw-fd2-stderr\\n')
+            threading.Thread(target=emit_late_raw_fd2_stderr, daemon=True).start()
+        if input in ('stale-turn-success', 'stale-turn-failure'):
+            self.stale_stderr_event.set()
+            time.sleep(0.1)
         if input == 'unknown-store-failure':
             print('stderr-only-store-secret', file=sys.stderr, flush=True)
             raise RuntimeError('unclassified-store-secret nested-cause-secret')
         if input == 'unknown-store-exit':
             print('stderr-only-store-secret', file=sys.stderr, flush=True)
             os._exit(23)
+        if input == 'secret-bearing-model-failure':
+            print('stderr-only-store-secret', file=sys.stderr, flush=True)
+            raise RuntimeError('SDK rejected unknown model "unknown-model" api_key=store-only-secret')
+        if input == 'oversized-unsafe-stderr':
+            print('stderr-prefix-' + ('x' * 40000) + '-oversized-stderr-store-secret', file=sys.stderr, flush=True)
+            raise RuntimeError('unclassified transport failure')
         if input == 'malformed-json':
             print('not-json', flush=True)
         if input == 'jsonrpc-failure':
             raise JsonRpcError('jsonrpc failure')
+        if input == 'sdk-protocol-secret':
+            raise SdkProtocolError('protocol failed with opaque-store-only-secret')
         if input == 'unexpected-exit':
             os._exit(23)
         active_session = session_id or 'generated-session'
@@ -261,6 +315,66 @@ class DeepSeekHarness:
         secret_events = input == 'secret-events'
         tool_id = 'call-' + secret if input == 'secret-tool-id' else 'call-1'
         finish_reason = input.split(':', 1)[1] if input.startswith('reason:') else 'completed'
+        failure_error = {'code': 'FAKE', 'message': 'provider failure'}
+        if input == 'connection-failure':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED deepseek.example:443',
+            }
+        if input == 'connection-failure-after-late-stderr':
+            time.sleep(0.3)
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED deepseek.example:443',
+            }
+        if input == 'stale-turn-failure':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED deepseek.example:443',
+            }
+        if input == 'runtime-internal-failure':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'runtime-error',
+                'message': 'DeepSeek Harness runtime internal failure',
+            }
+        if input == 'missing-provider-error-message':
+            finish_reason = 'error'
+            failure_error = {'code': 'runtime-error'}
+        if input == 'connection-failure-auth-host':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED AUTH.example:443',
+            }
+        if input == 'connection-failure-auth-secret':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED AUTH.example:443 token=store-only-secret',
+            }
+        if input == 'auth-credential-failure':
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'runtime-error',
+                'message': 'AUTH: rejected dummy-echoed-credential-value',
+            }
+        if input in ('provider-failure-with-stderr', 'provider-failure-late-stderr'):
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED deepseek.example:443',
+            }
+        if input == 'provider-failure-with-stderr':
+            print('unknown-provider-stderr', file=sys.stderr, flush=True)
+        if input == 'provider-failure-late-stderr':
+            def emit_late_stderr():
+                time.sleep(0.05)
+                print('unknown-provider-late-stderr', file=sys.stderr, flush=True)
+            threading.Thread(target=emit_late_stderr).start()
         event_finish_reason = 'blocked' if input == 'mismatched-reason' else finish_reason
         result_finish_reason = None if input == 'missing-result-reason' else finish_reason
         text = secret if secret_events else 'hello'
@@ -270,7 +384,7 @@ class DeepSeekHarness:
             {'type': 'tool/call', 'data': {'callId': tool_id, 'name': 'read', 'arguments': tool_arguments}},
             {'type': 'tool/result', 'data': {'message': {'source': {'callId': tool_id}, 'content': [{'type': 'tool-result', 'toolCallId': tool_id, 'content': [{'type': 'text', 'text': secret if secret_events else 'file'}]}]}}},
             {'type': 'assistant/chunk', 'data': {'chunk': {'type': 'text-delta', 'text': text}}},
-            {'type': 'turn/end', 'data': {'reason': {'kind': event_finish_reason, **({'error': {'code': 'FAKE', 'message': 'provider failure'}} if event_finish_reason == 'error' else {})}}},
+            {'type': 'turn/end', 'data': {'reason': {'kind': event_finish_reason, **({'error': failure_error} if event_finish_reason == 'error' else {})}}},
         ]
         if input == 'message-events':
             events = [
@@ -691,12 +805,6 @@ sys.implementation = types.SimpleNamespace(
       'SDK rejected unknown provider route "unknown-route"',
     ],
     [
-      'known-route/unknown-model',
-      'known-route',
-      'unknown-model',
-      'SDK rejected unknown model "unknown-model"',
-    ],
-    [
       'not-found-route/known-model',
       'not-found-route',
       'known-model',
@@ -737,6 +845,408 @@ sys.implementation = types.SimpleNamespace(
       }),
     ]));
     expect(events.some((event) => event.type === 'result' && event.data.success === true)).toBe(false);
+  });
+
+  it('returns an actionable diagnostic for a safe unknown-model transport failure', async () => {
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const response = await callDeepSeekHarness('worker', 'hello', {
+      cwd: root,
+      model: 'known-route/unknown-model',
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => events.push(event as unknown as { type: string; data: Record<string, unknown> }),
+    });
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(/model|reference/iu);
+    expect(response.content).not.toContain('Upstream error details are withheld');
+    expect(response.content).not.toContain('SDK rejected unknown model "unknown-model"');
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'error', data: { message: response.content, raw: response.content } },
+      expect.objectContaining({
+        type: 'result',
+        data: expect.objectContaining({ error: response.content, success: false }),
+      }),
+    ]));
+  });
+
+  it('classifies an AUTH-containing model identifier as a model failure on every failure sink', async () => {
+    const logsDir = path.join(root, 'auth-model-logs');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: 'auth-model',
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', 'hello', {
+      cwd: root,
+      model: 'AUTH-model',
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'AUTH-model',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'auth-model.md'),
+      workflowName: 'diagnostic',
+      task: 'auth-model',
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: '2026-09-24T12:00:00.000Z',
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: response.status,
+      content: response.content,
+      instruction: 'hello',
+      timestamp: '2026-09-24T12:00:00.000Z',
+    }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(/model.*reference/iu);
+    expect(response.content).not.toMatch(/credential|authentication/iu);
+    for (const surface of [JSON.stringify(events), persisted, report!]) {
+      expect(surface).toContain(response.content);
+      expect(surface).not.toMatch(/auth-rejected|credential|authentication/iu);
+    }
+  });
+
+  it.each([
+    ['connection-failure', /connection|connect|network|endpoint/iu, 'connect ECONNREFUSED deepseek.example:443'],
+    ['connection-failure-auth-host', /connection|connect|network|endpoint/iu, 'connect ECONNREFUSED AUTH.example:443'],
+    ['runtime-internal-failure', /runtime|internal|retry/iu, 'DeepSeek Harness runtime internal failure'],
+  ] as const)('returns one actionable diagnostic for a safe provider failure: %s', async (prompt, actionable, rawFailure) => {
+    const logsDir = path.join(root, `${prompt}-logs`);
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: prompt,
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        const captured = event as unknown as { type: string; data: Record<string, unknown> };
+        events.push(captured);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'deepseek-v4-flash',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const timestamp = '2026-09-24T12:00:00.000Z';
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, `${prompt}.md`),
+      workflowName: 'diagnostic',
+      task: prompt,
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: timestamp,
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: response.status,
+      content: response.content,
+      instruction: prompt,
+      timestamp,
+    }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(actionable);
+    expect(response.content).not.toContain('Upstream error details are withheld');
+    expect(response.content).not.toContain(rawFailure);
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'error', data: { message: response.content, raw: response.content } },
+      expect.objectContaining({
+        type: 'result',
+        data: expect.objectContaining({ error: response.content, success: false }),
+      }),
+    ]));
+    expect(persisted).toContain(response.content);
+    expect(persisted).not.toContain(rawFailure);
+    expect(report).toContain(response.content);
+    expect(report).not.toContain(rawFailure);
+  });
+
+  it('preserves an explicit AUTH credential rejection instead of treating it as a model failure', async () => {
+    const response = await callDeepSeekHarness('worker', 'auth-credential-failure', {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(/credential|provider refused/iu);
+    expect(response.content).not.toMatch(/model.*reference/iu);
+    expect(response.content).not.toContain('dummy-echoed-credential-value');
+  });
+
+  it('fails closed for a secret-bearing AUTH-containing connection message', async () => {
+    const response = await callDeepSeekHarness('worker', 'connection-failure-auth-secret', {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+
+    expect(response.status).toBe('error');
+    expect(response.content).toContain('Upstream error details are withheld');
+    expect(response.content).not.toContain('store-only-secret');
+    expect(response.content).not.toContain('AUTH.example');
+    expect(response.content).not.toContain('connect ECONNREFUSED');
+  });
+
+  it('fails closed when a structured provider error has no message', async () => {
+    const response = await callDeepSeekHarness('worker', 'missing-provider-error-message', {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+
+    expect(response.status).toBe('error');
+    expect(response.content).toContain('Upstream error details are withheld');
+    expect(response.content).not.toContain('runtime-error');
+  });
+
+  it('fails closed for an oversized stderr tail with an unrecognized secret on every failure sink', async () => {
+    const logsDir = path.join(root, 'oversized-unsafe-stderr-logs');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: 'oversized-unsafe-stderr',
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', 'oversized-unsafe-stderr', {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'deepseek-v4-flash',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const timestamp = '2026-09-24T12:00:00.000Z';
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'oversized-unsafe-stderr.md'),
+      workflowName: 'diagnostic',
+      task: 'oversized-unsafe-stderr',
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: timestamp,
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: response.status,
+      content: response.content,
+      instruction: 'oversized-unsafe-stderr',
+      timestamp,
+    }], [], 'full');
+    const surfaces = [JSON.stringify(response), JSON.stringify(events), persisted, report!];
+
+    expect(response.status).toBe('error');
+    expect(response.content).toContain('Upstream error details are withheld');
+    for (const surface of surfaces) {
+      expect(surface).toContain(response.content);
+      expect(surface).not.toContain('oversized-stderr-store-secret');
+      expect(surface).not.toContain('stderr tail:');
+    }
+  });
+
+  it.each([
+    ['provider-failure-with-stderr', undefined, 'unknown-provider-stderr'],
+    ['provider-failure-late-stderr', undefined, 'unknown-provider-late-stderr'],
+    ['transport-failure-with-stderr', 'known-route/transport-unsafe-stderr', 'unknown-transport-stderr'],
+  ] as const)('fails closed when a safe failure is accompanied by unknown stderr: %s', async (prompt, model, rawStderr) => {
+    const logsDir = path.join(root, `${prompt}-logs`);
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: prompt,
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root,
+      ...(model === undefined ? {} : { model }),
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: model ?? 'deepseek-v4-flash',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, `${prompt}.md`),
+      workflowName: 'diagnostic',
+      task: prompt,
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: '2026-09-24T12:00:00.000Z',
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: response.status,
+      content: response.content,
+      instruction: prompt,
+      timestamp: '2026-09-24T12:00:00.000Z',
+    }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toContain('Upstream error details are withheld');
+    for (const surface of [JSON.stringify(events), persisted, report!]) {
+      expect(surface).toContain(response.content);
+      expect(surface).not.toContain(rawStderr);
+      expect(surface).not.toContain('connect ECONNREFUSED');
+    }
+  });
+
+  it('fails closed when a pre-existing worker emits stderr during a later turn', async () => {
+    const sessionId = 'stale-turn-stderr-session';
+    const logsDir = path.join(root, 'stale-turn-stderr-logs');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId,
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const first = await callDeepSeekHarness('worker', 'stale-turn-success', {
+      cwd: root,
+      model: 'stale-turn-stderr',
+      sessionId,
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+    const second = await callDeepSeekHarness('worker', 'stale-turn-failure', {
+      cwd: root,
+      model: 'stale-turn-stderr',
+      sessionId,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'stale-turn-stderr',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'stale-turn-stderr.md'),
+      workflowName: 'diagnostic',
+      task: 'stale-turn-stderr',
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: '2026-09-24T12:00:00.000Z',
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: second.status,
+      content: second.content,
+      instruction: 'stale-turn-failure',
+      timestamp: '2026-09-24T12:00:00.000Z',
+    }], [], 'full');
+
+    expect(first).toMatchObject({ status: 'done', sessionId });
+    expect(second).toMatchObject({ status: 'error', sessionId, failureCategory: 'provider_error' });
+    expect(second.content).toContain('Upstream error details are withheld');
+    for (const surface of [JSON.stringify(second), JSON.stringify(events), persisted, report!]) {
+      expect(surface).toContain(second.content);
+      expect(surface).not.toContain('stale-turn-worker-stderr');
+      expect(surface).not.toContain('connect ECONNREFUSED');
+    }
+    expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
+      .trim()
+      .split('\n'))
+      .toHaveLength(1);
+  });
+
+  it('fails closed for a model-looking message with an unrecognized credential assignment', async () => {
+    const logsDir = path.join(root, 'secret-bearing-model-logs');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: 'secret-bearing-model-failure',
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', 'secret-bearing-model-failure', {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'deepseek-v4-flash',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const timestamp = '2026-09-24T12:00:00.000Z';
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'secret-bearing-model.md'),
+      workflowName: 'diagnostic',
+      task: 'secret-bearing-model-failure',
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: timestamp,
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: response.status,
+      content: response.content,
+      instruction: 'secret-bearing-model-failure',
+      timestamp,
+    }], [], 'full');
+    const surfaces = [JSON.stringify(response), JSON.stringify(events), persisted, report!];
+
+    expect(response.status).toBe('error');
+    expect(response.content).toContain('Upstream error details are withheld');
+    for (const surface of surfaces) {
+      expect(surface).not.toContain('store-only-secret');
+      expect(surface).not.toContain('stderr-only-store-secret');
+      expect(surface).not.toContain('SDK rejected unknown model');
+    }
   });
 
   it('sanitizes terminal control sequences in provider errors and stream events', async () => {
@@ -1143,6 +1653,40 @@ sys.implementation = types.SimpleNamespace(
     expect(response.content).toContain('unsupported turn completion reason');
   });
 
+  it.each([
+    ['reason:opaque-store-only-secret', 'opaque-store-only-secret'],
+    ['sdk-protocol-secret', 'opaque-store-only-secret'],
+  ] as const)('does not expose upstream protocol details across diagnostic sinks: %s', async (prompt, secret) => {
+    const logsDir = path.join(root, 'protocol-diagnostics');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir, sessionId: 'protocol', runId: 'protocol', enabled: true,
+    });
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event as unknown as { type: string; data: Record<string, unknown> });
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: 'deepseek-v4-flash', step: 'protocol' }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'protocol.md'), workflowName: 'diagnostic', task: 'diagnostic',
+      runSlug: 'diagnostic', status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{
+      type: 'step_complete', step: 'protocol', persona: 'worker', iteration: 1,
+      status: response.status, content: response.content, instruction: 'diagnostic',
+      timestamp: '2026-09-24T12:00:00.000Z',
+    }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_stream_parse_error' });
+    expect(response.content).toMatch(/protocol error|unsupported turn completion reason/iu);
+    for (const surface of [response.content, JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).not.toContain(secret);
+    }
+  });
+
   it('returns a provider error when SDK startup fails', async () => {
     const response = await callDeepSeekHarness('worker', 'hello', {
       cwd: root,
@@ -1338,6 +1882,88 @@ sys.implementation = types.SimpleNamespace(
       .trim()
       .split('\n'))
       .toHaveLength(1);
+  });
+
+  it('does not carry stderr from an earlier session turn into a later safe failure', async () => {
+    const first = await callDeepSeekHarness('worker', 'successful-turn-with-stderr', {
+      cwd: root,
+      sessionId: 'stderr-isolation-session',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+    const second = await callDeepSeekHarness('worker', 'connection-failure', {
+      cwd: root,
+      sessionId: 'stderr-isolation-session',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+
+    expect(first).toMatchObject({ status: 'done', sessionId: 'stderr-isolation-session' });
+    expect(second).toMatchObject({ status: 'error', sessionId: 'stderr-isolation-session' });
+    expect(second.content).toMatch(/connection|connect|network|endpoint/iu);
+    expect(second.content).not.toContain('Upstream error details are withheld');
+  });
+
+  it.each([
+    ['successful-turn-with-late-stderr', 'turn-one-late-stderr'],
+    ['successful-turn-with-late-buffer-stderr', 'turn-one-late-buffer-stderr'],
+    ['successful-turn-with-late-raw-fd2-stderr', 'turn-one-late-raw-fd2-stderr'],
+  ] as const)('does not attribute delayed stderr from a successful turn to a later failure: %s', async (firstPrompt, delayedStderr) => {
+    const logsDir = path.join(root, 'delayed-session-stderr-logs');
+    await mkdir(logsDir);
+    const logger = createProviderEventLogger({
+      logsDir,
+      sessionId: 'delayed-session-stderr',
+      runId: 'diagnostic',
+      enabled: true,
+    });
+    const events: unknown[] = [];
+    const first = await callDeepSeekHarness('worker', firstPrompt, {
+      cwd: root,
+      sessionId: 'delayed-session-stderr',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    });
+    const second = await callDeepSeekHarness('worker', 'connection-failure-after-late-stderr', {
+      cwd: root,
+      sessionId: 'delayed-session-stderr',
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({
+          provider: 'deepseek-harness',
+          providerModel: 'deepseek-v4-flash',
+          step: 'diagnostic',
+        }, event);
+      },
+    });
+    const persisted = await readFile(logger.filepath, 'utf8');
+    const timestamp = '2026-09-24T12:00:00.000Z';
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'delayed-session-stderr.md'),
+      workflowName: 'diagnostic',
+      task: 'delayed-session-stderr',
+      runSlug: 'diagnostic',
+      status: 'failed',
+      iterations: 1,
+      endTime: timestamp,
+    }, [{
+      type: 'step_complete',
+      step: 'diagnostic',
+      persona: 'worker',
+      iteration: 1,
+      status: second.status,
+      content: second.content,
+      instruction: 'connection-failure-after-late-stderr',
+      timestamp,
+    }], [], 'full');
+
+    expect(first).toMatchObject({ status: 'done', sessionId: 'delayed-session-stderr' });
+    expect(second).toMatchObject({ status: 'error', sessionId: 'delayed-session-stderr' });
+    expect(second.content).toMatch(/connection|connect|network|endpoint/iu);
+    expect(second.content).not.toContain('Upstream error details are withheld');
+    for (const surface of [JSON.stringify(events), persisted, report!]) {
+      expect(surface).toContain(second.content);
+      expect(surface).not.toContain(delayedStderr);
+      expect(surface).not.toContain('Upstream error details are withheld');
+    }
   });
 
   it('isolates process replacement from another session using the same configuration', async () => {

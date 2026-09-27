@@ -21,6 +21,17 @@ export type DeepSeekRuntimeCredentialFailureClassification =
   | 'auth-rejected'
   | 'unknown';
 
+export type DeepSeekRuntimeFailureClassification =
+  | 'model-reference'
+  | 'connection-failure'
+  | 'runtime-internal-failure'
+  | 'unknown';
+
+export interface DeepSeekRuntimeFailureEvidence {
+  code: string | undefined;
+  message: string | undefined;
+}
+
 export const DEEPSEEK_CREDENTIAL_DIAGNOSTIC_CLASSIFICATIONS: readonly DeepSeekCredentialFailureClassification[] = [
   'missing-credential',
   'invalid-store',
@@ -73,6 +84,30 @@ const CLASSIFICATION_DETAILS: Record<
     + 'Correct or remove that field before retrying.',
 };
 
+const SAFE_MODEL_REFERENCE_FAILURE = /^SDK rejected unknown model "[A-Za-z0-9][A-Za-z0-9._:/-]*"$/u;
+const SAFE_CONNECTION_FAILURE = /^connect (ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) [A-Za-z0-9.-]+(?::[0-9]{1,5})?$/u;
+const SAFE_RUNTIME_INTERNAL_FAILURES = new Set([
+  'DeepSeek Harness runtime internal failure',
+  'DeepSeek Harness SDK internal failure',
+]);
+const CONNECTION_FAILURE_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ENOTFOUND',
+]);
+
+const RUNTIME_FAILURE_DETAILS: Record<
+  Exclude<DeepSeekRuntimeFailureClassification, 'unknown'>,
+  string
+> = {
+  'model-reference': 'The selected DeepSeek Harness model reference was rejected. Verify the provider route and model name, then retry.',
+  'connection-failure': 'DeepSeek Harness could not connect to the selected endpoint. Verify the endpoint and network connectivity, then retry.',
+  'runtime-internal-failure': 'DeepSeek Harness reported an internal runtime failure. Verify the runtime installation and retry.',
+};
+
 function safeReference(reference: string | undefined): string | undefined {
   return isValidDeepSeekCredentialReference(reference)
     ? reference
@@ -108,10 +143,43 @@ export function classifyDeepSeekRuntimeCredentialFailure(
   ) {
     return 'invalid-store';
   }
-  if (/(?:^|[^A-Za-z])AUTH(?:[^A-Za-z]|$)/u.test(failure)) {
+  if (/(?:^|[^A-Za-z0-9_])AUTH\s*:/u.test(failure)) {
     return 'auth-rejected';
   }
   return 'unknown';
+}
+
+/** Classify only fixed, non-secret upstream failure shapes into actionable causes. */
+export function classifyDeepSeekRuntimeFailure(
+  evidence: DeepSeekRuntimeFailureEvidence,
+): DeepSeekRuntimeFailureClassification {
+  const { code, message } = evidence;
+  if (code === undefined || message === undefined || message.length === 0) {
+    return 'unknown';
+  }
+  if (code === 'runtime-error' && SAFE_MODEL_REFERENCE_FAILURE.test(message)) {
+    return 'model-reference';
+  }
+  const connectionMatch = SAFE_CONNECTION_FAILURE.exec(message);
+  if (
+    connectionMatch !== null
+    && (
+      code === 'runtime-error'
+      || (CONNECTION_FAILURE_CODES.has(code) && connectionMatch[1] === code)
+    )
+  ) {
+    return 'connection-failure';
+  }
+  if (code === 'runtime-error' && SAFE_RUNTIME_INTERNAL_FAILURES.has(message)) {
+    return 'runtime-internal-failure';
+  }
+  return 'unknown';
+}
+
+export function buildDeepSeekRuntimeFailureDiagnostic(
+  classification: Exclude<DeepSeekRuntimeFailureClassification, 'unknown'>,
+): string {
+  return RUNTIME_FAILURE_DETAILS[classification];
 }
 
 /** Carry a safe classification from the resolution boundary to the failure formatter. */
