@@ -352,3 +352,10 @@ tui:
     selectPrompt: "Select the running task to tell:"
     confirm: "Send this additional instruction?\nTask: {task}\nSummary: {summary}\nWorkflow: {workflow}\nCurrent step: {step}\nRun slug: {runSlug}\nInstruction:\n{content}"
     sent: "Additional instruction sent to {task} (instruction #{instructionId})."
+
+caccia:
+  success: "No unresolved CodeRabbit review threads remain."
+  skipped: "Caccia skipped: {reason}"
+  limit: "Caccia reached its iteration limit with {count} unresolved thread(s)."
+  failed: "Caccia failed: {error}"
+  notRun: "Caccia was not started."

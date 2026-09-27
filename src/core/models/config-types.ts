@@ -258,6 +258,21 @@ export interface PipelineConfig {
   prBodyTemplate?: string;
 }
 
+/** CodeRabbit review-loop settings shared by project and global configuration. */
+export interface CacciaSettings {
+  /** Automatically run after a task creates or updates a pull request. */
+  enabled: boolean;
+  /** Maximum time to wait for a CodeRabbit review, in milliseconds. */
+  waitTimeoutMs: number;
+  /** Maximum number of fix-and-review iterations. */
+  maxIterations: number;
+  /** Workflow identifier used for each review iteration. */
+  workflow: string;
+}
+
+/** Values explicitly stored in project/global config before defaults are applied. */
+export type CacciaConfig = Partial<CacciaSettings>;
+
 /** Workflow-level runtime.prepare policy */
 export interface WorkflowRuntimePrepareConfig {
   /** Allow custom script paths from workflow YAML (default: false) */
@@ -339,6 +354,8 @@ export interface ProjectConfig {
   withSubmodules?: boolean;
   /** Pipeline execution settings */
   pipeline?: PipelineConfig;
+  /** CodeRabbit review-loop settings */
+  caccia?: CacciaConfig;
   /** TAKT internal target provider/model overrides */
   taktProviders?: TaktProvidersConfig;
   /** Initial context files explicitly loaded by assistant interactive mode */

@@ -74,6 +74,14 @@ export function serializeGlobalConfig(config: GlobalConfig): Record<string, unkn
   if (config.draftPr !== undefined) {
     raw.draft_pr = config.draftPr;
   }
+  if (config.caccia !== undefined) {
+    const rawCaccia: Record<string, unknown> = {};
+    if (config.caccia.enabled !== undefined) rawCaccia.enabled = config.caccia.enabled;
+    if (config.caccia.waitTimeoutMs !== undefined) rawCaccia.wait_timeout_ms = config.caccia.waitTimeoutMs;
+    if (config.caccia.maxIterations !== undefined) rawCaccia.max_iterations = config.caccia.maxIterations;
+    if (config.caccia.workflow !== undefined) rawCaccia.workflow = config.caccia.workflow;
+    raw.caccia = rawCaccia;
+  }
   if (config.disabledBuiltins && config.disabledBuiltins.length > 0) {
     raw.disabled_builtins = config.disabledBuiltins;
   }

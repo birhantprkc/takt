@@ -61,6 +61,31 @@ const REVIEW_THREADS_PER_PAGE = 100;
 const REVIEW_THREAD_COMMENTS_PER_PAGE = 100;
 const GRAPHQL_PAGINATION_HARD_CAP = 100;
 const DELETED_GITHUB_USER_AUTHOR = 'deleted GitHub user';
+const CODERABBIT_LOGIN = 'coderabbitai';
+const COMPLETED_REVIEW_STATES = new Set(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED']);
+
+export interface CodeRabbitReviewThread {
+  id: string;
+  author: string;
+  body: string;
+  path: string;
+  line?: number;
+  url: string;
+  isOutdated: boolean;
+}
+
+export interface CodeRabbitReviewStatus {
+  headSha: string;
+  hasCodeRabbitPost: boolean;
+  reviewedHeadShas: string[];
+}
+
+export interface CacciaPullRequestDetails {
+  number: number;
+  headBranch: string;
+  headSha: string;
+  headRepositorySshUrl: string;
+}
 
 export function listOpenPrs(cwd: string): PrListItem[] {
   const repo = resolveRepositoryNameWithOwner(cwd);
@@ -169,6 +194,64 @@ query($threadId:ID!, $commentsEndCursor:String) {
         }
       }
     }
+  }
+}
+`;
+
+const CODERABBIT_REVIEWS_QUERY = `
+query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      reviews(first:${REVIEW_THREADS_PER_PAGE}, after:$endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          author { login }
+          state
+          submittedAt
+          commit { oid }
+        }
+      }
+    }
+  }
+}
+`;
+
+const CODERABBIT_THREAD_STARTERS_QUERY = `
+query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      reviewThreads(first:${REVIEW_THREADS_PER_PAGE}, after:$endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          comments(first:1) {
+            nodes { author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
+const CACCIA_PULL_REQUEST_QUERY = `
+query($owner:String!, $repo:String!, $number:Int!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      number
+      headRefName
+      headRefOid
+      headRepository {
+        sshUrl
+      }
+    }
+  }
+}
+`;
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `
+mutation($threadId:ID!) {
+  resolveReviewThread(input:{threadId:$threadId}) {
+    thread { id isResolved }
   }
 }
 `;
@@ -412,6 +495,343 @@ function parseRepositoryFromPrUrl(prUrl: string): { owner: string; repo: string 
   }
 
   return { owner, repo };
+}
+
+interface PullRequestLocator {
+  owner: string;
+  repo: string;
+  headSha: string;
+}
+
+class ReviewStatusDeadlineExceededError extends Error {}
+
+function isCommandTimeoutError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && error.code === 'ETIMEDOUT';
+}
+
+function runGhCommand(args: string[], cwd: string, deadlineAt?: number): string {
+  const options = { cwd, encoding: 'utf-8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+  if (deadlineAt === undefined) {
+    return execFileSync('gh', args, options);
+  }
+
+  const timeout = deadlineAt - Date.now();
+  if (timeout <= 0) {
+    throw new ReviewStatusDeadlineExceededError();
+  }
+
+  try {
+    return execFileSync('gh', args, {
+      ...options,
+      timeout,
+      killSignal: 'SIGKILL',
+    });
+  } catch (error) {
+    if (isCommandTimeoutError(error)) {
+      throw new ReviewStatusDeadlineExceededError();
+    }
+    throw error;
+  }
+}
+
+function fetchPullRequestLocator(
+  prNumber: number,
+  cwd: string,
+  deadlineAt?: number,
+): PullRequestLocator {
+  const raw = runGhCommand(
+    ['pr', 'view', String(prNumber), '--json', 'url,headRefOid'],
+    cwd,
+    deadlineAt,
+  );
+  const response = JSON.parse(raw) as { url?: unknown; headRefOid?: unknown };
+  if (typeof response.url !== 'string' || typeof response.headRefOid !== 'string' || !response.headRefOid) {
+    throw new Error(`Missing pull request URL or head SHA for pull request #${prNumber}`);
+  }
+  return { ...parseRepositoryFromPrUrl(response.url), headSha: response.headRefOid };
+}
+
+function buildCodeRabbitGraphqlArgs(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  query: string,
+  endCursor: string | undefined,
+): string[] {
+  const args = [
+    'api',
+    'graphql',
+    '-f', `owner=${owner}`,
+    '-f', `repo=${repo}`,
+    '-F', `number=${prNumber}`,
+  ];
+  if (endCursor !== undefined) {
+    args.push('-f', `endCursor=${endCursor}`);
+  }
+  args.push('-f', `query=${query}`);
+  return args;
+}
+
+interface CodeRabbitReviewNode {
+  author: { login: string } | null;
+  state: string;
+  submittedAt: string | null;
+  commit: { oid: string } | null;
+}
+
+interface CodeRabbitReviewPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: CodeRabbitReviewNode[];
+}
+
+function parseCodeRabbitReviewPage(raw: string, prNumber: number): CodeRabbitReviewPage {
+  const parsed = JSON.parse(raw) as {
+    data?: {
+      repository?: {
+        pullRequest?: { reviews?: CodeRabbitReviewPage | null } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+  const reviews = parsed.data?.repository?.pullRequest?.reviews;
+  if (!reviews) {
+    throw new Error(`Missing pull request reviews in GraphQL response for pull request #${prNumber}`);
+  }
+  return reviews;
+}
+
+function fetchCodeRabbitReviews(
+  locator: PullRequestLocator,
+  prNumber: number,
+  cwd: string,
+  deadlineAt?: number,
+): CodeRabbitReviewNode[] {
+  const reviews: CodeRabbitReviewNode[] = [];
+  let endCursor: string | undefined;
+  for (let page = 1; page <= GRAPHQL_PAGINATION_HARD_CAP; page += 1) {
+    const raw = runGhCommand(
+      buildCodeRabbitGraphqlArgs(locator.owner, locator.repo, prNumber, CODERABBIT_REVIEWS_QUERY, endCursor),
+      cwd,
+      deadlineAt,
+    );
+    const response = parseCodeRabbitReviewPage(raw, prNumber);
+    reviews.push(...response.nodes);
+    if (!response.pageInfo.hasNextPage) {
+      return reviews;
+    }
+    if (!response.pageInfo.endCursor) {
+      throw new Error(`Missing reviews endCursor for pull request #${prNumber}`);
+    }
+    endCursor = response.pageInfo.endCursor;
+  }
+  throw new Error(`Pagination limit exceeded while fetching pull request #${prNumber} reviews (>${GRAPHQL_PAGINATION_HARD_CAP} pages)`);
+}
+
+interface CodeRabbitThreadStarterPage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: Array<{ comments: { nodes: Array<{ author: { login: string } | null }> } }>;
+}
+
+function parseCodeRabbitThreadStarterPage(raw: string, prNumber: number): CodeRabbitThreadStarterPage {
+  const parsed = JSON.parse(raw) as {
+    data?: {
+      repository?: {
+        pullRequest?: { reviewThreads?: CodeRabbitThreadStarterPage | null } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+  const threads = parsed.data?.repository?.pullRequest?.reviewThreads;
+  if (!threads) {
+    throw new Error(`Missing pull request reviewThreads in GraphQL response for pull request #${prNumber}`);
+  }
+  return threads;
+}
+
+function fetchCodeRabbitThreadStarters(
+  locator: PullRequestLocator,
+  prNumber: number,
+  cwd: string,
+  deadlineAt?: number,
+): string[] {
+  const authors: string[] = [];
+  let endCursor: string | undefined;
+  for (let page = 1; page <= GRAPHQL_PAGINATION_HARD_CAP; page += 1) {
+    const raw = runGhCommand(
+      buildCodeRabbitGraphqlArgs(locator.owner, locator.repo, prNumber, CODERABBIT_THREAD_STARTERS_QUERY, endCursor),
+      cwd,
+      deadlineAt,
+    );
+    const response = parseCodeRabbitThreadStarterPage(raw, prNumber);
+    for (const thread of response.nodes) {
+      const starter = thread.comments.nodes[0]?.author?.login;
+      if (starter !== undefined) {
+        authors.push(starter);
+      }
+    }
+    if (!response.pageInfo.hasNextPage) {
+      return authors;
+    }
+    if (!response.pageInfo.endCursor) {
+      throw new Error(`Missing reviewThreads endCursor for pull request #${prNumber}`);
+    }
+    endCursor = response.pageInfo.endCursor;
+  }
+  throw new Error(`Pagination limit exceeded while fetching pull request #${prNumber} review threads (>${GRAPHQL_PAGINATION_HARD_CAP} pages)`);
+}
+
+/** Returns only unresolved review threads whose first comment was created by CodeRabbit. */
+export function fetchCodeRabbitReviewThreads(prNumber: number, cwd: string): CodeRabbitReviewThread[] {
+  const locator = fetchPullRequestLocator(prNumber, cwd);
+  const threads: CodeRabbitReviewThread[] = [];
+  let endCursor: string | undefined;
+
+  for (let page = 1; page <= GRAPHQL_PAGINATION_HARD_CAP; page += 1) {
+    const raw = execFileSync(
+      'gh',
+      buildReviewThreadsGraphqlArgs(locator.owner, locator.repo, prNumber, endCursor),
+      { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const response = parseReviewThreadsResponse(raw);
+    for (const thread of response.nodes) {
+      if (thread.isResolved) {
+        continue;
+      }
+      const comments = fetchReviewThreadComments(thread, prNumber, cwd);
+      const starter = comments[0];
+      if (!starter || starter.author?.login.toLowerCase() !== CODERABBIT_LOGIN) {
+        continue;
+      }
+      const line = starter.line ?? starter.originalLine ?? undefined;
+      threads.push({
+        id: thread.id,
+        author: starter.author.login,
+        body: starter.body,
+        path: starter.path,
+        ...(line === undefined ? {} : { line }),
+        url: starter.url,
+        isOutdated: thread.isOutdated,
+      });
+    }
+    if (!response.pageInfo.hasNextPage) {
+      return threads;
+    }
+    if (!response.pageInfo.endCursor) {
+      throw new Error(`Missing reviewThreads endCursor for pull request #${prNumber}`);
+    }
+    endCursor = response.pageInfo.endCursor;
+  }
+  throw new Error(`Pagination limit exceeded while fetching pull request #${prNumber} review threads (>${GRAPHQL_PAGINATION_HARD_CAP} pages)`);
+}
+
+/** Returns CodeRabbit review events and thread presence for wait and re-review checks. */
+export function fetchCodeRabbitReviewStatus(prNumber: number, cwd: string): CodeRabbitReviewStatus;
+export function fetchCodeRabbitReviewStatus(
+  prNumber: number,
+  cwd: string,
+  deadlineAt: number,
+): CodeRabbitReviewStatus | undefined;
+export function fetchCodeRabbitReviewStatus(
+  prNumber: number,
+  cwd: string,
+  deadlineAt?: number,
+): CodeRabbitReviewStatus | undefined {
+  let locator: PullRequestLocator;
+  let reviews: CodeRabbitReviewNode[];
+  let threadAuthors: string[];
+  try {
+    locator = fetchPullRequestLocator(prNumber, cwd, deadlineAt);
+    reviews = fetchCodeRabbitReviews(locator, prNumber, cwd, deadlineAt);
+    threadAuthors = fetchCodeRabbitThreadStarters(locator, prNumber, cwd, deadlineAt);
+  } catch (error) {
+    if (error instanceof ReviewStatusDeadlineExceededError) {
+      return undefined;
+    }
+    throw error;
+  }
+
+  const coderabbitReviews = reviews.filter((review) =>
+    review.author?.login.toLowerCase() === CODERABBIT_LOGIN
+    && review.submittedAt !== null
+    && COMPLETED_REVIEW_STATES.has(review.state));
+  return {
+    headSha: locator.headSha,
+    hasCodeRabbitPost: coderabbitReviews.length > 0
+      || threadAuthors.some((author) => author.toLowerCase() === CODERABBIT_LOGIN),
+    reviewedHeadShas: coderabbitReviews
+      .map((review) => review.commit?.oid)
+      .filter((sha): sha is string => sha !== null && sha !== undefined),
+  };
+}
+
+/** Reads the current PR head and its push target without changing the project worktree. */
+export function fetchCacciaPullRequestDetails(prNumber: number, cwd: string): CacciaPullRequestDetails {
+  const locator = fetchPullRequestLocator(prNumber, cwd);
+  const raw = execFileSync(
+    'gh',
+    buildCodeRabbitGraphqlArgs(locator.owner, locator.repo, prNumber, CACCIA_PULL_REQUEST_QUERY, undefined),
+    { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  const parsed = JSON.parse(raw) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          number: number;
+          headRefName: string;
+          headRefOid: string;
+          headRepository: { sshUrl: string } | null;
+        } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+  const pullRequest = parsed.data?.repository?.pullRequest;
+  if (!pullRequest || pullRequest.number !== prNumber || !pullRequest.headRepository) {
+    throw new Error(`Missing pull request head repository for pull request #${prNumber}`);
+  }
+  if (pullRequest.headRefOid !== locator.headSha) {
+    throw new Error(`Pull request #${prNumber} head changed while reading its metadata`);
+  }
+  if (!/^git@github\.com:[^\s:]+\/[^\s:]+\.git$/u.test(pullRequest.headRepository.sshUrl)) {
+    throw new Error(`Invalid GitHub SSH URL for pull request #${prNumber}`);
+  }
+  return {
+    number: pullRequest.number,
+    headBranch: pullRequest.headRefName,
+    headSha: pullRequest.headRefOid,
+    headRepositorySshUrl: pullRequest.headRepository.sshUrl,
+  };
+}
+
+/** Resolves the supplied GitHub review thread through its GraphQL thread ID. */
+export function resolveReviewThread(threadId: string, cwd: string): void {
+  const raw = execFileSync(
+    'gh',
+    ['api', 'graphql', '-f', `threadId=${threadId}`, '-f', `query=${RESOLVE_REVIEW_THREAD_MUTATION}`],
+    { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  const parsed = JSON.parse(raw) as {
+    data?: { resolveReviewThread?: { thread?: { id: string; isResolved: boolean } | null } | null };
+    errors?: Array<{ message: string }>;
+  };
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+  const thread = parsed.data?.resolveReviewThread?.thread;
+  if (!thread || thread.id !== threadId || !thread.isResolved) {
+    throw new Error(`GitHub did not resolve review thread ${threadId}`);
+  }
 }
 
 /**

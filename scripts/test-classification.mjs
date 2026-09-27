@@ -103,6 +103,8 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/interactive.test.ts',
   'src/__tests__/it-central-task-process.test.ts',
   'src/__tests__/it-report-inheritance-task-resume.test.ts',
+  // Exercises task persistence through synchronous private-artifact subprocesses.
+  'src/__tests__/it-task-restart-point.test.ts',
   // Launches a real Chrome/Chromium child process for browser layout assertions.
   'src/__tests__/it-web-ui-retry-dom.test.ts',
   'src/__tests__/kiro-config.test.ts',
@@ -135,6 +137,8 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/retrySlashCommand.test.ts',
   'src/__tests__/runtime-environment-windows.test.ts',
   'src/__tests__/runtime-environment.test.ts',
+  // Exercises task persistence through synchronous private-artifact subprocesses.
+  'src/__tests__/saveTaskFile.test.ts',
   'src/__tests__/selector-provider-resolution.test.ts',
   'src/__tests__/session-compaction-wiring.test.ts',
   'src/__tests__/session-key.test.ts',
@@ -146,6 +150,9 @@ export const auditedIntegrationBoundaryTestFiles = Object.freeze([
   'src/__tests__/sessionState.test.ts',
   'src/__tests__/summarize-non-workflow-provider.test.ts',
   'src/__tests__/system-workflow-schema.test.ts',
+  // These task-persistence suites use real store transitions and synchronous private-artifact subprocesses.
+  'src/__tests__/task-exceed-service.test.ts',
+  'src/__tests__/task.test.ts',
   'src/__tests__/taskForceFailActions.test.ts',
   'src/__tests__/traced-config-boundary.test.ts',
   'src/__tests__/traced-config-runtime-bridge-cache.test.ts',
@@ -288,7 +295,6 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/runtime-provider-loader.test.ts',
   'src/__tests__/runtime-yaml-boundary-capabilities-resolution.test.ts',
   'src/__tests__/runtime-yaml-boundary-legacy-signal.test.ts',
-  'src/__tests__/saveTaskFile.test.ts',
   'src/__tests__/selectAndExecute-skipTaskList.test.ts',
   'src/__tests__/selector-guidance-resolution.test.ts',
   'src/__tests__/selector-guidance-runtime-boundary.test.ts',
@@ -296,8 +302,6 @@ export const fileSystemIntegrationTestFiles = Object.freeze([
   'src/__tests__/session-reader.test.ts',
   'src/__tests__/sessionStore.test.ts',
   'src/__tests__/task-delete-task.test.ts',
-  'src/__tests__/task-exceed-service.test.ts',
-  'src/__tests__/task.test.ts',
   'src/__tests__/taskDeleteActions.test.ts',
   'src/__tests__/taskResultHandler.test.ts',
   'src/__tests__/taskSpecContext.test.ts',
@@ -349,7 +353,6 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/it-opencode-task-state-mcp.test.ts',
   'src/__tests__/it-run-session-instruct.test.ts',
   'src/__tests__/it-system-enqueue-effect-duplicate.test.ts',
-  'src/__tests__/it-task-restart-point.test.ts',
   'src/__tests__/it-web-ui-chat-tell.test.ts',
   'src/__tests__/it-workflow-loader.test.ts',
   'src/__tests__/it-workflow-policy.test.ts',

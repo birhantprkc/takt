@@ -348,6 +348,18 @@ takt watch --ignore-exceed
 
 `takt watch --ignore-exceed` の意味は `takt run --ignore-exceed` と同じです。workflow の `max_steps` を無視し、`.takt/tasks.yaml` に exceeded 用の再実行メタデータを書きません。
 
+### takt caccia
+
+既存の GitHub PR で CodeRabbit の投稿を待ち、未解決レビュースレッドに対応します。反復ごとに一時クローンで設定済みの Caccia workflow を実行し、`.takt/runs/` に判断レポートを残して修正を Push し、対象の CodeRabbit スレッドを Resolve した後、Push したコミットへのレビューを待ちます。人が開始したレビュースレッドには触れず、PR へのコメントや返信も投稿しません。
+
+```bash
+takt caccia 123
+```
+
+PR 番号は必須です。CodeRabbit の未解決スレッドがなくなった場合は終了コード `0`、GitHub 以外、待機上限内に CodeRabbit が投稿しない場合、反復上限到達、実行失敗の場合は非ゼロで終了します。反復上限では残ったスレッド数を表示します。認証済みの GitHub CLI（`gh`）が必要です。
+
+`wait_timeout_ms` は初回の CodeRabbit 投稿確認と、Push 後の各コミットに対する再レビュー待機に適用されます。初回待機が上限に達すると処理をスキップし、このコマンドは非ゼロで終了します。Push 後の対象コミットへのレビューが上限内に届かない場合は実行エラーとなり、このコマンドは非ゼロで終了します。
+
 ### takt list
 
 タスクブランチの一覧表示と操作（マージ、削除、ルートとの同期など）を行います。

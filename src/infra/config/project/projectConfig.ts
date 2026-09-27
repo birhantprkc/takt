@@ -108,6 +108,7 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
     analytics,
     telemetry,
     pipeline,
+    caccia,
     assistant,
     takt_providers,
     persona_providers,
@@ -182,6 +183,7 @@ export function loadProjectConfig(projectDir: string): ProjectConfig {
   return {
     language: language as ProjectConfig['language'],
     pipeline: normalizedPipeline,
+    caccia,
     assistant: normalizeAssistantConfig(assistant),
     taktProviders: normalizedTaktProviders,
     personaProviders: normalizedPersonaProviders,
@@ -310,6 +312,15 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
     if (config.pipeline.commitMessageTemplate !== undefined) pr.commit_message_template = config.pipeline.commitMessageTemplate;
     if (config.pipeline.prBodyTemplate !== undefined) pr.pr_body_template = config.pipeline.prBodyTemplate;
     if (Object.keys(pr).length > 0) savePayload.pipeline = pr;
+  }
+  delete savePayload.caccia;
+  if (config.caccia) {
+    const rawCaccia: Record<string, unknown> = {};
+    if (config.caccia.enabled !== undefined) rawCaccia.enabled = config.caccia.enabled;
+    if (config.caccia.waitTimeoutMs !== undefined) rawCaccia.wait_timeout_ms = config.caccia.waitTimeoutMs;
+    if (config.caccia.maxIterations !== undefined) rawCaccia.max_iterations = config.caccia.maxIterations;
+    if (config.caccia.workflow !== undefined) rawCaccia.workflow = config.caccia.workflow;
+    savePayload.caccia = rawCaccia;
   }
   const rawPersonaProviders = denormalizePersonaProviders(config.personaProviders);
   if (rawPersonaProviders && Object.keys(rawPersonaProviders).length > 0) {

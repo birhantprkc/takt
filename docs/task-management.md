@@ -309,6 +309,16 @@ The recommended end-to-end workflow:
 4. **Verify outputs** -- Check execution reports in `.takt/runs/{run_slug}/reports/`. The run slug is assigned per execution; find it via the `run_slug` field in `tasks.yaml` or the newest directory under `.takt/runs/`.
 5. **`takt list`** -- Review results, merge successful branches, retry failures, or add further instructions.
 
+## CodeRabbit review loop (`caccia`)
+
+When a task creates or updates a pull request, TAKT can run the Caccia review loop afterward. The linked path is disabled by default and requires `caccia.enabled: true` in project or global configuration. Pipeline mode uses the same linked path after `--auto-pr` successfully creates a pull request.
+
+Caccia waits for CodeRabbit, then processes only unresolved threads started by `coderabbitai`. Each iteration runs the configured workflow in a temporary clone, preserves its decision report under `.takt/runs/`, pushes successful fixes, resolves only the threads evaluated in that iteration, and waits for CodeRabbit to review the pushed commit. Human-started threads remain open. Caccia does not post pull-request comments or replies, and a linked Caccia result does not change the completed task result. Successes and iteration-limit results are logged and sent through the configured notification path.
+
+The `wait_timeout_ms` limit applies to the initial review and each pushed commit review. An initial timeout skips linked Caccia quietly and preserves the task result. A timeout waiting for a pushed commit review logs an error and also preserves the completed task result. The standalone `takt caccia` command exits non-zero on either timeout.
+
+Run the same feature manually with `takt caccia <PR-number>`. See the [CLI reference](./cli-reference.md#takt-caccia) and [configuration reference](./configuration.md#caccia-review-loop) for command results and settings.
+
 ## Isolated Execution (Isolated Clone)
 
 Specifying `worktree` in task configuration executes each task in an isolated clone created with `git clone`, keeping your main working directory clean.
