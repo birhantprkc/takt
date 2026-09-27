@@ -141,6 +141,11 @@ class SdkProtocolError(Exception):
     pass
 
 class JsonRpcError(Exception):
+    def __init__(self, message, data=None):
+        super().__init__(message)
+        self.data = data
+
+class TransportClosedError(Exception):
     pass
 
 class DeepSeekHarnessConfig:
@@ -164,6 +169,8 @@ class DeepSeekHarnessConfig:
 
 class DeepSeekHarness:
     def __init__(self, **kwargs):
+        if sys.argv[0] == '-c' and os.path.exists(${JSON.stringify(path.join(root, 'fail-probe-store-secret'))}):
+            raise RuntimeError('probe-store-only-secret')
         self.config = DeepSeekHarnessConfig(**kwargs)
         kwargs = self.config.kwargs
         self.kwargs = kwargs
@@ -226,6 +233,8 @@ class DeepSeekHarness:
             raise RuntimeError('ENOENT: SDK model not found "enoent-model"')
         if kwargs.get('model') == 'runtime-unavailable-model':
             raise FileNotFoundError('missing DeepSeek Harness runtime wheel')
+        if kwargs.get('model') == 'runtime-unavailable-secret-model':
+            raise FileNotFoundError('missing bundled runtime: startup-store-only-secret')
         if kwargs.get('model') == 'terminal-diagnostic-model':
             raise RuntimeError('SDK diagnostic \\x1b]52;clipboard\\x07\\x1b[31mraw\\x1b[0m\\x01')
     def start(self):
@@ -330,6 +339,13 @@ class DeepSeekHarness:
             print('not-json', flush=True)
         if input == 'jsonrpc-failure':
             raise JsonRpcError('jsonrpc failure')
+        if input == 'sdk-jsonrpc-secret':
+            raise JsonRpcError('JSON-RPC error: jsonrpc-store-only-secret', {'detail': 'jsonrpc-data-store-only-secret'}) from RuntimeError('cause-store-only-secret')
+        if input == 'sdk-transport-secret':
+            print('stderr-store-only-secret', file=sys.stderr, flush=True)
+            raise TransportClosedError('DeepSeek Harness runtime stdout closed\\nstderr tail: transport-store-only-secret')
+        if input == 'sdk-timeout-secret':
+            raise TimeoutError('session_prompt timed out\\nselected dsh profile timeout-store-only-secret\\nstderr tail: opaque-store-secret')
         if input == 'sdk-protocol-secret':
             raise SdkProtocolError('protocol failed with opaque-store-only-secret')
         if input == 'unexpected-exit':
@@ -1495,6 +1511,48 @@ sys.implementation = types.SimpleNamespace(
     expect(response.content).not.toMatch(/python_path|Python 3\.10/iu);
   });
 
+  it('withholds a store-only value from an SDK runtime-unavailable startup failure', async () => {
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', 'hello', {
+      cwd: root, model: 'runtime-unavailable-secret-model',
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => events.push(event),
+    });
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toMatch(/managed environment|install/iu);
+    for (const surface of [JSON.stringify(response), JSON.stringify(events)]) {
+      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).not.toContain('startup-store-only-secret');
+    }
+  });
+
+  it('withholds an SDK probe failure even when its traceback contains a store-only value', async () => {
+    await writeFile(path.join(root, 'fail-probe-store-secret'), '1');
+    const logger = createProviderEventLogger({ logsDir: root, sessionId: 'probe-secret', runId: 'probe-secret', enabled: true });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', 'hello', {
+      cwd: root, providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: 'deepseek-v4-flash', step: 'probe' }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'probe-secret.md'), workflowName: 'diagnostic', task: 'probe-secret',
+      runSlug: 'probe-secret', status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{ type: 'step_complete', step: 'probe', persona: 'worker', iteration: 1,
+      status: response.status, content: response.content, instruction: 'hello',
+      timestamp: '2026-09-24T12:00:00.000Z' }], [], 'full');
+
+    expect(response.status).toBe('error');
+    expect(response.content).toMatch(/managed.*install/iu);
+    for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).not.toContain('probe-store-only-secret');
+      expect(surface).toContain('Upstream error details are withheld');
+    }
+  });
+
   it('preserves multiple assistant messages when the SDK omits chunk events', async () => {
     const textEvents: string[] = [];
     const response = await callDeepSeekHarness('worker', 'message-events', {
@@ -2006,6 +2064,36 @@ sys.implementation = types.SimpleNamespace(
     expect(response.status).toBe('error');
     expect(response.failureCategory).toBe('provider_error');
     expect(response.content).toContain('Upstream error details are withheld');
+  });
+
+  it.each([
+    ['sdk-jsonrpc-secret', /JSON-RPC/iu, ['jsonrpc-store-only-secret', 'jsonrpc-data-store-only-secret', 'cause-store-only-secret']],
+    ['sdk-transport-secret', /runtime.*closed|connection.*closed/iu, ['stderr-store-only-secret', 'transport-store-only-secret']],
+    ['sdk-timeout-secret', /timed out/iu, ['timeout-store-only-secret', 'opaque-store-secret']],
+  ] as const)('reports a safe SDK failure kind without copying its message, cause or stderr: %s', async (prompt, cause, secrets) => {
+    const logger = createProviderEventLogger({ logsDir: root, sessionId: prompt, runId: prompt, enabled: true });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root, providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: 'deepseek-v4-flash', step: prompt }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, `${prompt}.md`), workflowName: 'diagnostic', task: prompt,
+      runSlug: prompt, status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{ type: 'step_complete', step: prompt, persona: 'worker', iteration: 1,
+      status: response.status, content: response.content, instruction: prompt,
+      timestamp: '2026-09-24T12:00:00.000Z' }], [], 'full');
+
+    expect(response.status).toBe('error');
+    expect(response.content).toMatch(cause);
+    expect(response.content).toContain('Upstream error details are withheld');
+    for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).toContain(response.content);
+      for (const secret of secrets) expect(surface).not.toContain(secret);
+    }
   });
 
   it('does not let protocol-error cleanup race with the next queued session turn', async () => {

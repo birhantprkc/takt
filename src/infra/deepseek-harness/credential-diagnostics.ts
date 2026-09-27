@@ -197,6 +197,18 @@ export function buildDeepSeekRuntimeFailureDiagnostic(
     + (stderrTail === undefined ? '' : `\nstderr tail: ${stderrTail}`);
 }
 
+/** SDK exception type is mapped to a bridge-owned code; its message and cause remain untrusted. */
+export function buildDeepSeekSdkFailureDiagnostic(code: string | undefined): string | undefined {
+  switch (code) {
+    case 'jsonrpc-error':
+      return 'DeepSeek Harness runtime returned a JSON-RPC error. Verify the provider configuration and retry. Upstream error details are withheld.';
+    case 'transport-closed':
+      return 'DeepSeek Harness runtime connection closed. Verify the runtime installation and retry. Upstream error details are withheld.';
+    default:
+      return undefined;
+  }
+}
+
 /** Project fixed failure phrases and recognizable secret fields; reject any remaining free text. */
 export function projectDeepSeekRuntimeMessage(message: string): string | undefined {
   if (Buffer.byteLength(message, 'utf8') > 8192 || sanitizeTerminalText(message) !== message) return undefined;

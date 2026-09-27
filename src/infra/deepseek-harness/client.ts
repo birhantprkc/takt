@@ -58,6 +58,7 @@ import {
 import {
   buildCredentialDiagnostic,
   buildDeepSeekRuntimeFailureDiagnostic,
+  buildDeepSeekSdkFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
   classifyDeepSeekRuntimeFailure,
   projectDeepSeekRuntimeMessage,
@@ -536,7 +537,8 @@ function bridgeError(
     : 'DeepSeek Harness bridge failed without a diagnostic';
   const formatted = `DeepSeek Harness ${code}: ${message}`;
   if (code === 'timeout') {
-    return new DeepSeekHarnessTimeoutError(formatted);
+    // The pinned SDK includes a selected profile and stderr tail in timeout text.
+    return new DeepSeekHarnessTimeoutError('DeepSeek Harness SDK request timed out. Upstream error details are withheld.');
   }
   if (code === 'malformed-response' || code === 'protocol-error') {
     // The SDK's protocol error body may contain a credential from its own store.
@@ -1182,8 +1184,8 @@ class DeepSeekHarnessProcess {
         throw error;
       }
       throw new Error(
-        `Unable to start DeepSeek Harness Python bridge from managed environment at "${this.pythonPath}". `
-        + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}: ${safeMessage(error, this.knownSecrets)}`,
+        `Unable to start DeepSeek Harness Python bridge: managed SDK validation failed. `
+        + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}. Upstream error details are withheld.`,
         { cause: error },
       );
     }
@@ -1206,8 +1208,8 @@ class DeepSeekHarnessProcess {
       );
     } catch (error) {
       throw new Error(
-        `Unable to start DeepSeek Harness Python bridge from managed environment at "${this.pythonPath}". `
-        + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}: ${safeMessage(error, this.knownSecrets)}`,
+        `Unable to start DeepSeek Harness Python bridge from managed environment. `
+        + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}. Upstream error details are withheld.`,
         { cause: error },
       );
     }
@@ -1235,8 +1237,8 @@ class DeepSeekHarnessProcess {
       const diagnostic = safeMessage(error, this.knownSecrets);
       if (isRuntimeSetupFailure(error, diagnostic)) {
         throw new Error(
-          `Unable to start DeepSeek Harness Python bridge from managed environment at "${this.pythonPath}". `
-          + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}: ${safeMessage(error, this.knownSecrets)}`,
+          `Unable to start DeepSeek Harness Python bridge from managed environment. `
+          + `${DEEPSEEK_HARNESS_INSTALL_INSTRUCTION}. Upstream error details are withheld.`,
           { cause: error },
         );
       }
@@ -2081,7 +2083,7 @@ function failureDetail(
     error instanceof DeepSeekHarnessTimeoutError
     || (error instanceof Error && error.name === 'TimeoutError')
   ) {
-    return createPartTimeoutFailure(error.message);
+    return createPartTimeoutFailure('DeepSeek Harness operation timed out. Upstream error details are withheld.');
   }
   if (error instanceof DeepSeekHarnessProtocolError) {
     return createProviderStreamParseFailure(safeMessage(error, knownSecrets));
@@ -2119,6 +2121,12 @@ function failureDetail(
       if (diagnostic !== undefined) {
         return diagnostic;
       }
+    }
+    const sdkDiagnostic = error instanceof DeepSeekHarnessTransportError
+      ? buildDeepSeekSdkFailureDiagnostic(error.bridgeCode)
+      : undefined;
+    if (sdkDiagnostic !== undefined) {
+      return createProviderErrorFailure(sdkDiagnostic);
     }
     // Store-only values are deliberately unknown to TAKT. Never expose an
     // unclassified upstream message or stderr tail based on partial redaction.

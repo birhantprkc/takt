@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildCredentialDiagnostic,
   buildDeepSeekRuntimeFailureDiagnostic,
+  buildDeepSeekSdkFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
   classifyDeepSeekRuntimeFailure,
   projectDeepSeekRuntimeMessage,
@@ -64,6 +65,14 @@ describe('DeepSeek Harness runtime credential failure classification', () => {
 });
 
 describe('DeepSeek Harness actionable runtime failure classification', () => {
+  it('uses only known SDK exception codes and never the exception message for generic diagnostics', () => {
+    expect(buildDeepSeekSdkFailureDiagnostic('jsonrpc-error')).toMatch(/JSON-RPC.*withheld/iu);
+    expect(buildDeepSeekSdkFailureDiagnostic('transport-closed')).toMatch(/connection closed.*withheld/iu);
+    for (const code of ['runtime-error', 'runtime-unavailable', 'unknown', 'AUTH: store-only-secret']) {
+      expect(buildDeepSeekSdkFailureDiagnostic(code)).toBeUndefined();
+    }
+  });
+
   it.each([
     [
       'a model reference failure',
