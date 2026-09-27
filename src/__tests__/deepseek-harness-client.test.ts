@@ -191,11 +191,17 @@ class DeepSeekHarness:
             print('unknown-transport-stderr', file=sys.stderr, flush=True)
             raise RuntimeError('SDK rejected unknown model "AUTH-model"')
         self.stale_stderr_event = None
+        self.stale_stderr_release = None
+        self.stale_stderr_armed = None
         self.stale_stderr_stop = None
         self.stale_stderr_thread = None
+        self.stale_stderr_emitted = None
         if kwargs.get('model') == 'stale-turn-stderr':
             self.stale_stderr_event = threading.Event()
+            self.stale_stderr_release = threading.Event()
+            self.stale_stderr_armed = threading.Event()
             self.stale_stderr_stop = threading.Event()
+            self.stale_stderr_emitted = threading.Event()
             def emit_stale_stderr():
                 while not self.stale_stderr_stop.is_set():
                     if not self.stale_stderr_event.wait(1):
@@ -203,7 +209,14 @@ class DeepSeekHarness:
                     self.stale_stderr_event.clear()
                     if self.stale_stderr_stop.is_set():
                         return
+                    self.stale_stderr_armed.set()
+                    if not self.stale_stderr_release.wait(10):
+                        continue
+                    self.stale_stderr_release.clear()
+                    if self.stale_stderr_stop.is_set():
+                        return
                     print('stale-turn-worker-stderr', file=sys.stderr, flush=True)
+                    self.stale_stderr_emitted.set()
             self.stale_stderr_thread = threading.Thread(target=emit_stale_stderr, daemon=True)
             self.stale_stderr_thread.start()
         if kwargs.get('provider') == 'not-found-route':
@@ -224,6 +237,7 @@ class DeepSeekHarness:
         if self.stale_stderr_stop is not None:
             self.stale_stderr_stop.set()
             self.stale_stderr_event.set()
+            self.stale_stderr_release.set()
             self.stale_stderr_thread.join(timeout=1)
         self.closed = True
 
@@ -269,9 +283,14 @@ class DeepSeekHarness:
                 time.sleep(0.2)
                 os.write(sys.stderr.fileno(), b'turn-one-late-raw-fd2-stderr\\n')
             threading.Thread(target=emit_late_raw_fd2_stderr, daemon=True).start()
-        if input in ('stale-turn-success', 'stale-turn-failure'):
+        if input == 'stale-turn-success':
             self.stale_stderr_event.set()
-            time.sleep(0.1)
+            if not self.stale_stderr_armed.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not arm')
+        if input == 'stale-turn-failure':
+            self.stale_stderr_release.set()
+            if not self.stale_stderr_emitted.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not emit')
         if input == 'unknown-store-failure':
             print('stderr-only-store-secret', file=sys.stderr, flush=True)
             raise RuntimeError('unclassified-store-secret nested-cause-secret')
@@ -329,7 +348,7 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
-        if input == 'stale-turn-failure':
+        if input in ('stale-turn-failure', 'stale-turn-failure-no-stderr'):
             finish_reason = 'error'
             failure_error = {
                 'code': 'ECONNREFUSED',
@@ -1190,6 +1209,26 @@ sys.implementation = types.SimpleNamespace(
       expect(surface).not.toContain('stale-turn-worker-stderr');
       expect(surface).not.toContain('connect ECONNREFUSED');
     }
+    expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
+      .trim()
+      .split('\n'))
+      .toHaveLength(1);
+  });
+
+  it('keeps the same worker actionable on a later turn without stderr', async () => {
+    const options = {
+      cwd: root,
+      model: 'stale-turn-stderr',
+      sessionId: 'no-stale-stderr-session',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    };
+    const first = await callDeepSeekHarness('worker', 'stale-turn-success', options);
+    const second = await callDeepSeekHarness('worker', 'stale-turn-failure-no-stderr', options);
+
+    expect(first).toMatchObject({ status: 'done', sessionId: options.sessionId });
+    expect(second).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(second.content).toMatch(/connection|connect|endpoint/iu);
+    expect(second.content).not.toContain('Upstream error details are withheld');
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim()
       .split('\n'))
