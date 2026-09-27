@@ -1245,6 +1245,9 @@ class DeepSeekHarnessProcess {
   }
 
   private attachChild(child: ChildProcess): void {
+    // Node emits close only after the child's stdio streams have closed.
+    // A process-tree termination error after that point cannot hide late stderr.
+    child.once('close', () => { this.processDrainComplete = true; });
     this.reader = child.stdout === null
       ? undefined
       : createInterface({ input: child.stdout });
@@ -2008,7 +2011,9 @@ function hasSafeRuntimeFailureEvidence(
   ) {
     return false;
   }
-  return sanitizeSensitiveTextWithKnownValues(message, knownSecrets) === message;
+  const projected = projectDeepSeekRuntimeMessage(message);
+  return projected !== undefined
+    && !Object.values(knownSecrets).some((value) => value.length > 0 && projected.includes(value));
 }
 
 function runtimeFailureEvidence(
@@ -2041,11 +2046,12 @@ function safeRuntimeFailureClassification(
   }
   if (stderrPresent) {
     const tail = stderrTail.trim();
+    const projectedTail = projectDeepSeekRuntimeStderr(tail);
     if (
       tail.length === 0
       || sanitizeTerminalText(tail) !== tail
-      || sanitizeSensitiveTextWithKnownValues(tail, knownSecrets) !== tail
-      || projectDeepSeekRuntimeStderr(tail) === undefined
+      || projectedTail === undefined
+      || Object.values(knownSecrets).some((value) => value.length > 0 && projectedTail.includes(value))
     ) {
       return 'unknown';
     }

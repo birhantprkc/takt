@@ -1,5 +1,7 @@
 import { describeDeepSeekCredentialHomeOrigin, type DeepSeekCredentialHomeOrigin } from './credential-home.js';
 import { isValidDeepSeekCredentialReference } from './credential-settings.js';
+import { isSensitiveKeyName } from '../../shared/utils/sensitiveText.js';
+import { sanitizeTerminalText } from '../../shared/utils/index.js';
 
 export type DeepSeekCredentialFailureClassification =
   | 'missing-credential'
@@ -25,6 +27,7 @@ export type DeepSeekRuntimeFailureClassification =
   | 'model-reference'
   | 'connection-failure'
   | 'runtime-internal-failure'
+  | 'other-provider-transport'
   | 'unknown';
 
 export interface DeepSeekRuntimeFailureEvidence {
@@ -86,10 +89,10 @@ const CLASSIFICATION_DETAILS: Record<
 
 const SAFE_MODEL_REFERENCE_FAILURE = /^SDK rejected unknown model "[A-Za-z0-9][A-Za-z0-9._:/-]*"$/u;
 const SAFE_CONNECTION_FAILURE = /^connect (ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) [A-Za-z0-9.-]+(?::[0-9]{1,5})?$/u;
-const SAFE_RUNTIME_INTERNAL_FAILURES = new Set([
-  'DeepSeek Harness runtime internal failure',
-  'DeepSeek Harness SDK internal failure',
-]);
+const PROJECTABLE_RUNTIME_MESSAGE = /^(SDK rejected unknown model "[A-Za-z0-9][A-Za-z0-9._:/-]*"|connect (?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) [A-Za-z0-9.-]+(?::[0-9]{1,5})?|DeepSeek Harness (?:runtime|SDK) internal failure|provider request failed: timeout|transport request failed: connection refused)([ ;].*)?$/u;
+const SENSITIVE_FIELD = /^([A-Za-z_][A-Za-z0-9_.-]{0,127})\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;,"']+)$/iu;
+const SENSITIVE_ENV_NAME = /^[A-Z][A-Z0-9_]{0,123}_(?:KEY|TOKEN|SECRET|PASSWORD)$/u;
+const TOKEN_LIKE_FIELD = /^(?:sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})$/u;
 const CONNECTION_FAILURE_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
@@ -106,6 +109,7 @@ const RUNTIME_FAILURE_DETAILS: Record<
   'model-reference': 'The selected DeepSeek Harness model reference was rejected. Verify the provider route and model name, then retry.',
   'connection-failure': 'DeepSeek Harness could not connect to the selected endpoint. Verify the endpoint and network connectivity, then retry.',
   'runtime-internal-failure': 'DeepSeek Harness reported an internal runtime failure. Verify the runtime installation and retry.',
+  'other-provider-transport': 'DeepSeek Harness reported a provider or transport failure. Check the projected upstream detail and retry.',
 };
 
 function safeReference(reference: string | undefined): string | undefined {
@@ -157,10 +161,14 @@ export function classifyDeepSeekRuntimeFailure(
   if (code === undefined || message === undefined || message.length === 0) {
     return 'unknown';
   }
-  if (code === 'runtime-error' && SAFE_MODEL_REFERENCE_FAILURE.test(message)) {
+  const projected = projectDeepSeekRuntimeMessage(message);
+  if (projected === undefined) {
+    return 'unknown';
+  }
+  if (code === 'runtime-error' && projected.startsWith('SDK rejected unknown model [REDACTED]')) {
     return 'model-reference';
   }
-  const connectionMatch = SAFE_CONNECTION_FAILURE.exec(message);
+  const connectionMatch = /^connect (ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) \[REDACTED\]/u.exec(projected);
   if (
     connectionMatch !== null
     && (
@@ -170,8 +178,11 @@ export function classifyDeepSeekRuntimeFailure(
   ) {
     return 'connection-failure';
   }
-  if (code === 'runtime-error' && SAFE_RUNTIME_INTERNAL_FAILURES.has(message)) {
+  if (code === 'runtime-error' && projected.startsWith('DeepSeek Harness ') && projected.includes(' internal failure')) {
     return 'runtime-internal-failure';
+  }
+  if (code === 'runtime-error' && /^(?:provider request failed: timeout|transport request failed: connection refused)(?:;|$)/u.test(projected)) {
+    return 'other-provider-transport';
   }
   return 'unknown';
 }
@@ -186,16 +197,40 @@ export function buildDeepSeekRuntimeFailureDiagnostic(
     + (stderrTail === undefined ? '' : `\nstderr tail: ${stderrTail}`);
 }
 
-/** Project only fixed grammar. Never copy a model id, hostname, path or other opaque value. */
+/** Project fixed failure phrases and recognizable secret fields; reject any remaining free text. */
 export function projectDeepSeekRuntimeMessage(message: string): string | undefined {
-  if (SAFE_MODEL_REFERENCE_FAILURE.test(message)) {
-    return 'SDK rejected unknown model [REDACTED]';
+  if (Buffer.byteLength(message, 'utf8') > 8192 || sanitizeTerminalText(message) !== message) return undefined;
+  const match = PROJECTABLE_RUNTIME_MESSAGE.exec(message);
+  if (match === null) return undefined;
+  const base = match[1];
+  if (base === undefined) return undefined;
+  const projectedFields = projectSensitiveFields(match[2]);
+  if (projectedFields === undefined) return undefined;
+  if (SAFE_MODEL_REFERENCE_FAILURE.test(base)) return `SDK rejected unknown model [REDACTED]${projectedFields}`;
+  const connection = SAFE_CONNECTION_FAILURE.exec(base);
+  if (connection !== null) return `connect ${connection[1]} [REDACTED]${projectedFields}`;
+  return `${base}${projectedFields}`;
+}
+
+function projectSensitiveFields(suffix: string | undefined): string | undefined {
+  if (suffix === undefined) return '';
+  const fields = suffix.replace(/^[ ;]+/u, '').split(/\s*;\s*/u);
+  if (fields.length === 0 || fields.some((field) => field.length === 0)) return undefined;
+  const projected: string[] = [];
+  for (const field of fields) {
+    const assignment = SENSITIVE_FIELD.exec(field);
+    if (assignment !== null && assignment[1] !== undefined
+      && (isSensitiveKeyName(assignment[1]) || SENSITIVE_ENV_NAME.test(assignment[1]))) {
+      projected.push(assignment[1].toLowerCase() === 'authorization'
+        ? 'auth=[REDACTED]'
+        : 'credential=[REDACTED]');
+    } else if (TOKEN_LIKE_FIELD.test(field)) {
+      projected.push('token=[REDACTED]');
+    } else {
+      return undefined;
+    }
   }
-  const connection = SAFE_CONNECTION_FAILURE.exec(message);
-  if (connection !== null) {
-    return `connect ${connection[1]} [REDACTED]`;
-  }
-  return SAFE_RUNTIME_INTERNAL_FAILURES.has(message) ? message : undefined;
+  return `; ${projected.join('; ')}`;
 }
 
 /** A stderr tail may be shown only when its complete, single-line shape is known. */

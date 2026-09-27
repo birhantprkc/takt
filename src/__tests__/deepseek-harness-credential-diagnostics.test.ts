@@ -90,6 +90,11 @@ describe('DeepSeek Harness actionable runtime failure classification', () => {
       { code: 'runtime-error', message: 'DeepSeek Harness runtime internal failure' },
       'runtime-internal-failure',
     ],
+    [
+      'an unclassified provider request with masked credentials',
+      { code: 'runtime-error', message: 'provider request failed: timeout; Authorization: Bearer store-only-secret' },
+      'other-provider-transport',
+    ],
   ] as const)('classifies %s', (_label, evidence, expected) => {
     expect(classifyDeepSeekRuntimeFailure(evidence)).toBe(expected);
   });
@@ -97,13 +102,9 @@ describe('DeepSeek Harness actionable runtime failure classification', () => {
   it.each([
     ['a missing message', { code: 'runtime-error', message: undefined }],
     ['an explicit credential rejection', { code: 'runtime-error', message: AUTH_REJECTED_FAILURE }],
-    ['a secret-bearing model message', {
+    ['an opaque secret without a field boundary', {
       code: 'runtime-error',
-      message: 'SDK rejected unknown model "unknown-model" api_key=store-only-secret',
-    }],
-    ['an ambiguous connection message', {
-      code: 'ECONNREFUSED',
-      message: 'connect ECONNREFUSED deepseek.example:443 token=store-only-secret',
+      message: 'provider request failed: timeout store-only-secret',
     }],
     ['a mismatched connection code', {
       code: 'ETIMEDOUT',
@@ -117,6 +118,7 @@ describe('DeepSeek Harness actionable runtime failure classification', () => {
     ['model-reference', /model.*reference/iu],
     ['connection-failure', /endpoint|network/iu],
     ['runtime-internal-failure', /runtime.*failure/iu],
+    ['other-provider-transport', /provider or transport/iu],
   ] as const)('builds an actionable diagnostic for %s', (classification, expected) => {
     const message = buildDeepSeekRuntimeFailureDiagnostic(classification);
 
@@ -131,10 +133,20 @@ describe('DeepSeek Harness actionable runtime failure classification', () => {
       .toBe('connect ECONNREFUSED [REDACTED]');
     expect(projectDeepSeekRuntimeStderr('connect ECONNRESET opaque-store-only-secret:443'))
       .toBe('connect ECONNRESET [REDACTED]');
+    expect(projectDeepSeekRuntimeMessage('SDK rejected unknown model "opaque-model" api_key=store-only-secret'))
+      .toBe('SDK rejected unknown model [REDACTED]; credential=[REDACTED]');
+    expect(projectDeepSeekRuntimeMessage('connect ECONNREFUSED peer.example:443 token=store-only-secret'))
+      .toBe('connect ECONNREFUSED [REDACTED]; credential=[REDACTED]');
+    expect(projectDeepSeekRuntimeMessage('provider request failed: timeout; Authorization: Bearer store-only-secret; CUSTOM_DSH_KEY=opaque-store-value; sk-1234567890'))
+      .toBe('provider request failed: timeout; auth=[REDACTED]; credential=[REDACTED]; token=[REDACTED]');
+    expect(projectDeepSeekRuntimeStderr('transport request failed: connection refused; token=opaque-store-secret'))
+      .toBe('transport request failed: connection refused; credential=[REDACTED]');
     expect(projectDeepSeekRuntimeStderr('Authorization: Bearer opaque-store-only-secret')).toBeUndefined();
     expect(projectDeepSeekRuntimeStderr('connect ECONNRESET peer.example:443\nsecret=opaque-store-only-secret'))
       .toBeUndefined();
     expect(projectDeepSeekRuntimeStderr('')).toBeUndefined();
+    expect(projectDeepSeekRuntimeMessage('provider request failed: timeout; opaque=store-only-secret')).toBeUndefined();
+    expect(projectDeepSeekRuntimeMessage('provider request failed: timeout; token=secret; unexpected detail')).toBeUndefined();
   });
 });
 

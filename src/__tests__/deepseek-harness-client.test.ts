@@ -366,6 +366,13 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
+        if input == 'provider-request-masked-fields':
+            print('transport request failed: connection refused; token=stderr-store-only-secret', file=sys.stderr, flush=True)
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'runtime-error',
+                'message': 'provider request failed: timeout; Authorization: Bearer header-store-only-secret; CUSTOM_DSH_KEY=env-store-only-secret; sk-1234567890',
+            }
         if input == 'connection-failure-after-late-stderr':
             time.sleep(0.3)
             finish_reason = 'error'
@@ -1082,17 +1089,48 @@ sys.implementation = types.SimpleNamespace(
     expect(response.content).not.toContain('dummy-echoed-credential-value');
   });
 
-  it('fails closed for a secret-bearing AUTH-containing connection message', async () => {
+  it('masks a store-only token in an AUTH-containing connection message', async () => {
     const response = await callDeepSeekHarness('worker', 'connection-failure-auth-secret', {
       cwd: root,
       providerOptions: { requestTimeoutMs: 10_000 },
     });
 
     expect(response.status).toBe('error');
-    expect(response.content).toContain('Upstream error details are withheld');
+    expect(response.content).toContain('Upstream message: connect ECONNREFUSED [REDACTED]; credential=[REDACTED]');
     expect(response.content).not.toContain('store-only-secret');
     expect(response.content).not.toContain('AUTH.example');
-    expect(response.content).not.toContain('connect ECONNREFUSED');
+    expect(response.content).not.toContain('token=store-only-secret');
+  });
+
+  it('projects unknown provider failures with token, header, env and stderr masking on every sink', async () => {
+    const prompt = 'provider-request-masked-fields';
+    const logger = createProviderEventLogger({ logsDir: root, sessionId: prompt, runId: prompt, enabled: true });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: 'deepseek-v4-flash', step: prompt }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'masked-fields.md'), workflowName: 'diagnostic', task: prompt,
+      runSlug: prompt, status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{ type: 'step_complete', step: prompt, persona: 'worker', iteration: 1,
+      status: response.status, content: response.content, instruction: prompt,
+      timestamp: '2026-09-24T12:00:00.000Z' }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toContain('Upstream message: provider request failed: timeout');
+    expect(response.content).toContain('stderr tail: transport request failed: connection refused; credential=[REDACTED]');
+    for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).toContain('auth=[REDACTED]');
+      expect(surface).toContain('token=[REDACTED]');
+      for (const secret of ['header-store-only-secret', 'env-store-only-secret', 'stderr-store-only-secret', 'sk-1234567890']) {
+        expect(surface).not.toContain(secret);
+      }
+    }
   });
 
   it('fails closed when a structured provider error has no message', async () => {
