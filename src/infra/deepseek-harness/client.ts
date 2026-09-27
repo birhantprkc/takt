@@ -60,6 +60,8 @@ import {
   buildDeepSeekRuntimeFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
   classifyDeepSeekRuntimeFailure,
+  projectDeepSeekRuntimeMessage,
+  projectDeepSeekRuntimeStderr,
   DeepSeekCredentialDiagnosticError,
   type DeepSeekRuntimeFailureEvidence,
   type DeepSeekCredentialFailureClassification,
@@ -140,6 +142,8 @@ interface HarnessStreamState {
   failureMessage?: string;
   stderrPresent: boolean;
   stderrObservationComplete: boolean;
+  stderrTail: string;
+  stderrOverflow: boolean;
 }
 
 class DeepSeekHarnessProtocolError extends Error {
@@ -1346,6 +1350,13 @@ class DeepSeekHarnessProcess {
           }
           if (this.activeTurnState !== undefined) {
             this.activeTurnState.stderrPresent = true;
+            if (attributedToActiveTurn) {
+              this.activeTurnState.stderrTail += text;
+              if (Buffer.byteLength(this.activeTurnState.stderrTail, 'utf8') > DEEPSEEK_HARNESS_MAX_ERROR_BYTES) {
+                this.activeTurnState.stderrOverflow = true;
+                this.activeTurnState.stderrTail = '';
+              }
+            }
           }
         }
         this.appendStderr(this.stderrRedactor.write(text, this.knownSecrets));
@@ -2022,9 +2033,22 @@ function safeRuntimeFailureClassification(
   knownSecrets: Record<string, string>,
   stderrPresent: boolean,
   stderrObservationComplete: boolean,
+  stderrTail: string,
+  stderrOverflow: boolean,
 ): ReturnType<typeof classifyDeepSeekRuntimeFailure> {
-  if (!stderrObservationComplete || stderrPresent) {
+  if (!stderrObservationComplete || stderrOverflow) {
     return 'unknown';
+  }
+  if (stderrPresent) {
+    const tail = stderrTail.trim();
+    if (
+      tail.length === 0
+      || sanitizeTerminalText(tail) !== tail
+      || sanitizeSensitiveTextWithKnownValues(tail, knownSecrets) !== tail
+      || projectDeepSeekRuntimeStderr(tail) === undefined
+    ) {
+      return 'unknown';
+    }
   }
   const evidence = runtimeFailureEvidence(error);
   if (!hasSafeRuntimeFailureEvidence(evidence, knownSecrets)) {
@@ -2040,6 +2064,8 @@ function failureDetail(
   credentialFailureContext: CredentialFailureContext = {},
   stderrPresent = false,
   stderrObservationComplete = false,
+  stderrTail = '',
+  stderrOverflow = false,
 ): AgentFailureDetail {
   if (options.abortSignal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
     const detail = classifyAbortSignalReason(options.abortSignal?.reason ?? error);
@@ -2070,9 +2096,16 @@ function failureDetail(
       knownSecrets,
       stderrPresent,
       stderrObservationComplete,
+      stderrTail,
+      stderrOverflow,
     );
     if (runtimeClassification !== 'unknown') {
-      return createProviderErrorFailure(buildDeepSeekRuntimeFailureDiagnostic(runtimeClassification));
+      const evidence = runtimeFailureEvidence(error);
+      return createProviderErrorFailure(buildDeepSeekRuntimeFailureDiagnostic(
+        runtimeClassification,
+        projectDeepSeekRuntimeMessage(evidence.message ?? ''),
+        stderrPresent ? projectDeepSeekRuntimeStderr(stderrTail.trim()) : undefined,
+      ));
     }
     const classification = classifyDeepSeekRuntimeCredentialFailure(getErrorMessage(error));
     if (classification !== 'unknown' && !knownSafeRuntimeFailureShape(error, knownSecrets)) {
@@ -2225,6 +2258,8 @@ export async function callDeepSeekHarness(
     emittedToolResults: new Set(),
     stderrPresent: false,
     stderrObservationComplete: false,
+    stderrTail: '',
+    stderrOverflow: false,
   };
   try {
     const run = async (): Promise<AgentResponse> => {
@@ -2280,6 +2315,8 @@ export async function callDeepSeekHarness(
       credentialFailureContext,
       state.stderrPresent,
       state.stderrObservationComplete,
+      state.stderrTail,
+      state.stderrOverflow,
     );
     const content = formatAgentFailure(detail);
     const responseStatus = error instanceof DeepSeekHarnessTurnEndError

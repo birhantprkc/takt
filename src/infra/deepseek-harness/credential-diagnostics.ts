@@ -178,8 +178,29 @@ export function classifyDeepSeekRuntimeFailure(
 
 export function buildDeepSeekRuntimeFailureDiagnostic(
   classification: Exclude<DeepSeekRuntimeFailureClassification, 'unknown'>,
+  upstreamMessage?: string,
+  stderrTail?: string,
 ): string {
-  return RUNTIME_FAILURE_DETAILS[classification];
+  return RUNTIME_FAILURE_DETAILS[classification]
+    + (upstreamMessage === undefined ? '' : ` Upstream message: ${upstreamMessage}`)
+    + (stderrTail === undefined ? '' : `\nstderr tail: ${stderrTail}`);
+}
+
+/** Project only fixed grammar. Never copy a model id, hostname, path or other opaque value. */
+export function projectDeepSeekRuntimeMessage(message: string): string | undefined {
+  if (SAFE_MODEL_REFERENCE_FAILURE.test(message)) {
+    return 'SDK rejected unknown model [REDACTED]';
+  }
+  const connection = SAFE_CONNECTION_FAILURE.exec(message);
+  if (connection !== null) {
+    return `connect ${connection[1]} [REDACTED]`;
+  }
+  return SAFE_RUNTIME_INTERNAL_FAILURES.has(message) ? message : undefined;
+}
+
+/** A stderr tail may be shown only when its complete, single-line shape is known. */
+export function projectDeepSeekRuntimeStderr(stderr: string): string | undefined {
+  return projectDeepSeekRuntimeMessage(stderr);
 }
 
 /** Carry a safe classification from the resolution boundary to the failure formatter. */

@@ -341,6 +341,13 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
+        if input == 'connection-failure-safe-stderr':
+            print('connect ECONNRESET peer.example:443', file=sys.stderr, flush=True)
+            finish_reason = 'error'
+            failure_error = {
+                'code': 'ECONNREFUSED',
+                'message': 'connect ECONNREFUSED deepseek.example:443',
+            }
         if input == 'connection-failure-after-late-stderr':
             time.sleep(0.3)
             finish_reason = 'error'
@@ -991,7 +998,13 @@ sys.implementation = types.SimpleNamespace(
     expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
     expect(response.content).toMatch(actionable);
     expect(response.content).not.toContain('Upstream error details are withheld');
-    expect(response.content).not.toContain(rawFailure);
+    expect(response.content).toContain('Upstream message:');
+    if (prompt === 'runtime-internal-failure') {
+      expect(response.content).toContain(rawFailure);
+    } else {
+      expect(response.content).not.toContain(rawFailure);
+      expect(response.content).toContain('[REDACTED]');
+    }
     expect(events).toEqual(expect.arrayContaining([
       { type: 'error', data: { message: response.content, raw: response.content } },
       expect.objectContaining({
@@ -1000,9 +1013,43 @@ sys.implementation = types.SimpleNamespace(
       }),
     ]));
     expect(persisted).toContain(response.content);
-    expect(persisted).not.toContain(rawFailure);
     expect(report).toContain(response.content);
-    expect(report).not.toContain(rawFailure);
+    if (prompt !== 'runtime-internal-failure') {
+      expect(persisted).not.toContain(rawFailure);
+      expect(report).not.toContain(rawFailure);
+    }
+  });
+
+  it('shows only projected upstream message and safe stderr tail on every failure sink', async () => {
+    const prompt = 'connection-failure-safe-stderr';
+    const logger = createProviderEventLogger({
+      logsDir: root, sessionId: prompt, runId: 'safe-stderr', enabled: true,
+    });
+    const events: unknown[] = [];
+    const response = await callDeepSeekHarness('worker', prompt, {
+      cwd: root,
+      providerOptions: { requestTimeoutMs: 10_000 },
+      onStream: (event) => {
+        events.push(event);
+        logger.logEvent({ provider: 'deepseek-harness', providerModel: 'deepseek-v4-flash', step: prompt }, event);
+      },
+    });
+    const report = renderTraceReportFromRecords({
+      tracePath: path.join(root, 'safe-stderr.md'), workflowName: 'diagnostic', task: prompt,
+      runSlug: 'safe-stderr', status: 'failed', iterations: 1, endTime: '2026-09-24T12:00:00.000Z',
+    }, [{ type: 'step_complete', step: prompt, persona: 'worker', iteration: 1,
+      status: response.status, content: response.content, instruction: prompt,
+      timestamp: '2026-09-24T12:00:00.000Z' }], [], 'full');
+
+    expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    expect(response.content).toContain('Upstream message: connect ECONNREFUSED [REDACTED]');
+    expect(response.content).toContain('stderr tail: connect ECONNRESET [REDACTED]');
+    for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
+      expect(surface).toContain('connect ECONNREFUSED [REDACTED]');
+      expect(surface).toContain('connect ECONNRESET [REDACTED]');
+      expect(surface).not.toContain('deepseek.example');
+      expect(surface).not.toContain('peer.example');
+    }
   });
 
   it('preserves an explicit AUTH credential rejection instead of treating it as a model failure', async () => {

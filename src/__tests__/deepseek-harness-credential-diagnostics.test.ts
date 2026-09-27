@@ -4,6 +4,8 @@ import {
   buildDeepSeekRuntimeFailureDiagnostic,
   classifyDeepSeekRuntimeCredentialFailure,
   classifyDeepSeekRuntimeFailure,
+  projectDeepSeekRuntimeMessage,
+  projectDeepSeekRuntimeStderr,
   DEEPSEEK_CREDENTIAL_DIAGNOSTIC_CLASSIFICATIONS,
   type DeepSeekCredentialDiagnosticContext,
 } from '../infra/deepseek-harness/credential-diagnostics.js';
@@ -120,6 +122,19 @@ describe('DeepSeek Harness actionable runtime failure classification', () => {
 
     expect(message).toMatch(expected);
     expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+  });
+
+  it('projects only safe upstream syntax and erases opaque fields', () => {
+    expect(projectDeepSeekRuntimeMessage('SDK rejected unknown model "opaque-store-only-secret"'))
+      .toBe('SDK rejected unknown model [REDACTED]');
+    expect(projectDeepSeekRuntimeMessage('connect ECONNREFUSED opaque-store-only-secret:443'))
+      .toBe('connect ECONNREFUSED [REDACTED]');
+    expect(projectDeepSeekRuntimeStderr('connect ECONNRESET opaque-store-only-secret:443'))
+      .toBe('connect ECONNRESET [REDACTED]');
+    expect(projectDeepSeekRuntimeStderr('Authorization: Bearer opaque-store-only-secret')).toBeUndefined();
+    expect(projectDeepSeekRuntimeStderr('connect ECONNRESET peer.example:443\nsecret=opaque-store-only-secret'))
+      .toBeUndefined();
+    expect(projectDeepSeekRuntimeStderr('')).toBeUndefined();
   });
 });
 
