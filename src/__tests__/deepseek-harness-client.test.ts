@@ -196,6 +196,7 @@ class DeepSeekHarness:
         self.stale_stderr_stop = None
         self.stale_stderr_thread = None
         self.stale_stderr_emitted = None
+        self.stale_stderr_prior = False
         if kwargs.get('model') == 'stale-turn-stderr':
             self.stale_stderr_event = threading.Event()
             self.stale_stderr_release = threading.Event()
@@ -215,7 +216,7 @@ class DeepSeekHarness:
                     self.stale_stderr_release.clear()
                     if self.stale_stderr_stop.is_set():
                         return
-                    print('stale-turn-worker-stderr', file=sys.stderr, flush=True)
+                    print('connect ECONNRESET stale.example:443' if self.stale_stderr_prior else 'stale-turn-worker-stderr', file=sys.stderr, flush=True)
                     self.stale_stderr_emitted.set()
             self.stale_stderr_thread = threading.Thread(target=emit_stale_stderr, daemon=True)
             self.stale_stderr_thread.start()
@@ -287,10 +288,27 @@ class DeepSeekHarness:
             self.stale_stderr_event.set()
             if not self.stale_stderr_armed.wait(1):
                 raise RuntimeError('pre-existing stderr worker did not arm')
+        if input == 'stale-turn-success-prior-stderr':
+            self.stale_stderr_prior = True
+            self.stale_stderr_event.set()
+            if not self.stale_stderr_armed.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not arm')
+            self.stale_stderr_release.set()
+            if not self.stale_stderr_emitted.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not emit')
         if input == 'stale-turn-failure':
             self.stale_stderr_release.set()
             if not self.stale_stderr_emitted.wait(1):
                 raise RuntimeError('pre-existing stderr worker did not emit')
+        if input == 'stale-turn-failure-prior-stderr':
+            self.stale_stderr_armed.clear()
+            self.stale_stderr_emitted.clear()
+            self.stale_stderr_event.set()
+            if not self.stale_stderr_armed.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not rearm')
+            self.stale_stderr_release.set()
+            if not self.stale_stderr_emitted.wait(1):
+                raise RuntimeError('pre-existing stderr worker did not emit again')
         if input == 'unknown-store-failure':
             print('stderr-only-store-secret', file=sys.stderr, flush=True)
             raise RuntimeError('unclassified-store-secret nested-cause-secret')
@@ -355,7 +373,7 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
-        if input in ('stale-turn-failure', 'stale-turn-failure-no-stderr'):
+        if input in ('stale-turn-failure', 'stale-turn-failure-no-stderr', 'stale-turn-failure-prior-stderr'):
             finish_reason = 'error'
             failure_error = {
                 'code': 'ECONNREFUSED',
@@ -1255,6 +1273,33 @@ sys.implementation = types.SimpleNamespace(
       expect(surface).toContain(second.content);
       expect(surface).not.toContain('stale-turn-worker-stderr');
       expect(surface).not.toContain('connect ECONNREFUSED');
+    }
+    expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
+      .trim()
+      .split('\n'))
+      .toHaveLength(1);
+  });
+
+  it('does not attribute a previously noisy worker’s safe-shaped stderr to the next failure', async () => {
+    const options = {
+      cwd: root,
+      model: 'stale-turn-stderr',
+      sessionId: 'previous-worker-stderr-session',
+      providerOptions: { requestTimeoutMs: 10_000 },
+    };
+    const first = await callDeepSeekHarness('worker', 'stale-turn-success-prior-stderr', options);
+    const events: unknown[] = [];
+    const second = await callDeepSeekHarness('worker', 'stale-turn-failure-prior-stderr', {
+      ...options,
+      onStream: (event) => events.push(event),
+    });
+
+    expect(first).toMatchObject({ status: 'done', sessionId: options.sessionId });
+    expect(second).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
+    for (const surface of [JSON.stringify(second), JSON.stringify(events)]) {
+      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).not.toContain('stderr tail:');
+      expect(surface).not.toContain('ECONNRESET');
     }
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim()

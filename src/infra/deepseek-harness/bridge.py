@@ -136,12 +136,12 @@ def _stderr_request_id() -> str | None:
     thread = threading.current_thread()
     if thread is _MAIN_THREAD:
         return _current_stderr_request_id
-    if _current_stderr_request_id is not None:
-        _current_stderr_threads.add(thread)
-        return _current_stderr_request_id
     previous_request_id = _previous_thread_stderr_request_ids.get(thread)
     if previous_request_id is not None:
         return previous_request_id
+    if _current_stderr_request_id is not None:
+        _current_stderr_threads.add(thread)
+        return _current_stderr_request_id
     existing_request_id = _thread_stderr_request_ids.get(thread)
     if existing_request_id is not None:
         return existing_request_id
