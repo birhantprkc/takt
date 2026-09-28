@@ -13,15 +13,16 @@ import assertContinuation from './interactive-topic-continuation.mjs';
 import { persistGeneratedOutput } from '../providers/interactive-topic-judge.mjs';
 import { buildInteractiveSystemPrompt } from '../../src/features/interactive/conversationPlan.ts';
 import { buildSummaryPrompt } from '../../src/features/interactive/interactive-summary.ts';
+import { buildTellConversationPrompt } from '../../src/features/interactive/tellCommand.ts';
 import { prependInteractiveTopicBoundary } from '../../src/features/interactive/promptSections.ts';
 import { loadTemplate } from '../../src/shared/prompts/index.ts';
 
 for (const language of ['ja', 'en']) {
   test(`${language} eval and runtime assemble the same topic boundary on all three paths`, () => {
     const boundary = loadTemplate('parts/interactive_topic_boundary', language).trim();
-    const continuation = buildPrompt({ vars: {
-      language, scenario: 'continuation', fixture: 'separate', mode: 'assistant',
-    } });
+    const continuation = buildPrompt({
+      vars: { language, scenario: 'continuation', fixture: 'separate', mode: 'assistant' },
+    });
     const runtimeInteractive = buildInteractiveSystemPrompt(language, { grillMe: false });
     assert.ok(runtimeInteractive.startsWith(`${boundary}\n\n---\n\n`));
     assert.ok(continuation.includes(`SYSTEM:\n${boundary}\n\n---\n\n`));
@@ -37,11 +38,22 @@ for (const language of ['ja', 'en']) {
     const runtimeTellSystem = prependInteractiveTopicBoundary(
       language, loadTemplate('score_tell_system_prompt', language),
     );
-    const tell = buildPrompt({ vars: { language, scenario: 'tell', fixture: 'tell-separate' } });
-    assert.ok(tell.includes(`SYSTEM:\n${runtimeTellSystem}\n\nUSER:`));
-    assert.match(tell, language === 'ja'
-      ? /選択された送信先.*Quint 検証/s
-      : /Selected recipient.*Quint validation/s);
+    for (const fixture of ['tell-separate', 'tell-prior-recipient']) {
+      const tellFixturePath = new URL(`../cases/interactive-topic-boundary/${fixture}.yaml`, import.meta.url);
+      const tellHistory = parse(readFileSync(tellFixturePath, 'utf8'))[language];
+      const recipient = fixture === 'tell-separate'
+        ? (language === 'ja'
+          ? { name: 'Quint 検証', summary: 'Quint 診断の改善' }
+          : { name: 'Quint validation', summary: 'Improve Quint diagnostics' })
+        : (language === 'ja'
+          ? { name: 'caccia', summary: 'レビュー指摘への対応' }
+          : { name: 'caccia', summary: 'Handle review findings' });
+      const tell = buildPrompt({ vars: { language, scenario: 'tell', fixture } });
+      const runtimeTellUser = buildTellConversationPrompt(tellHistory, language, { task: recipient });
+      assert.ok(tell.includes(`SYSTEM:\n${runtimeTellSystem}\n\nUSER:`));
+      assert.ok(tell.endsWith(`USER:\n${runtimeTellUser}`),
+        `${language}/${fixture} eval USER payload must equal the runtime builder output`);
+    }
   });
 }
 

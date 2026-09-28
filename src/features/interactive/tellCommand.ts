@@ -36,7 +36,7 @@ function safeTellContentDisplayText(value: string): string {
   return sanitizeTerminalText(value);
 }
 
-function buildTellConversationPrompt(
+export function buildTellConversationPrompt(
   history: readonly ConversationMessage[],
   lang: 'en' | 'ja',
   target: TellableRunningTask,
