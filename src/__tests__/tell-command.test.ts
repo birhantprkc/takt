@@ -33,6 +33,8 @@ vi.mock('../features/interactive/aiCaller.js', () => ({
 }));
 
 import { runTellCommand } from '../features/interactive/tellCommand.js';
+import { prependInteractiveTopicBoundary } from '../features/interactive/promptSections.js';
+import { loadTemplate } from '../shared/prompts/index.js';
 
 const target = {
   task: {
@@ -220,6 +222,28 @@ describe('runTellCommand', () => {
       '/project',
       target.runSlug,
       'Generated standalone instruction.',
+    );
+  });
+
+  it.each(['en', 'ja'] as const)('passes the complete localized /tell system prompt to the provider (%s)', async (lang) => {
+    await runTellCommand({
+      cwd: '/project',
+      lang,
+      inlineText: '',
+      history: [{ role: 'user', content: 'Add a login audit.' }],
+      sessionContext: {
+        provider: {} as never,
+        providerType: 'mock',
+        model: 'mock-model',
+        lang,
+        personaName: 'assistant',
+        sessionId: undefined,
+      },
+    });
+
+    expect(mockCallAIWithRetry).toHaveBeenCalledOnce();
+    expect(mockCallAIWithRetry.mock.calls[0]?.[1]).toBe(
+      prependInteractiveTopicBoundary(lang, loadTemplate('score_tell_system_prompt', lang)),
     );
   });
 
