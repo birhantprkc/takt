@@ -79,6 +79,8 @@ In the TUI conversation history, submitted user messages are shown with a full-w
 4. Finalize task instructions with `/go` (you can also add additional instructions like `/go additional instructions`)
 5. Execute (run workflow, create PR)
 
+`/go` creates instructions for the latest task topic; earlier topics are included only when you explicitly combine them into the same task.
+
 ### Interactive Mode Variants
 
 | Mode | Description |
@@ -96,7 +98,7 @@ In the TUI conversation history, submitted user messages are shown with a full-w
 | `/provider` | Select another provider. |
 | `/model <value>` | Use a free-form model override for this conversation. |
 | `/effort <value>` | Use a free-form reasoning effort override for this conversation. |
-| `/tell [instruction]` | Select a running worktree-clone task, review an additional instruction, and send it after confirmation. With no inline instruction, the full conversation is converted into a standalone additional-instruction body. An interactive terminal is required; no instruction is sent when confirmation is unavailable. |
+| `/tell [instruction]` | Select a running worktree-clone task, review an additional instruction, and send it after confirmation. With no inline instruction, the latest discussion about that task is converted into a standalone additional-instruction body. An interactive terminal is required; no instruction is sent when confirmation is unavailable. |
 
 `/tell` is available in the ordinary CLI/TUI `assistant`, `grill-me`, and `persona` conversations, including after switching between those modes. It still requires a running task backed by a valid TAKT-managed worktree clone when selecting a recipient. The Web UI does not execute the local `/tell` handoff; text such as `/tell review this task` is sent to the assistant as a regular message. Dedicated Retry and Instruct conversations do not expose `/tell`; use their task-action controls instead.
 
@@ -271,7 +273,7 @@ Inside exec mode:
 | Command | Description |
 |---------|-------------|
 | `/setup` | Edit agents, replan facets, loop detection thresholds, and project/global presets |
-| `/go` | Summarize the conversation into executable task instructions and run the generated workflow |
+| `/go` | Summarize the latest task topic into executable task instructions and run the generated workflow |
 | `/go <note>` | Run with an additional note appended to the conversation summary |
 | `/paste-image` | While editing the current input line, replace the line with a clipboard image placeholder |
 | `/cancel` | Exit without executing |

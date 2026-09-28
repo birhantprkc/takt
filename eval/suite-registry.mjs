@@ -93,6 +93,11 @@ const CLASSIFICATIONS = [
     suites: ['final-readiness-precision'],
   },
   {
+    tier: 'active',
+    reason: '対話中の話題切り替えと /go /tell の最新タスク境界を日英で測る',
+    suites: ['interactive-topic-boundary'],
+  },
+  {
     tier: 'retained',
     reason: '弱いモデルでの再走査能力を追跡する比較資産で、通常の prompt regression gate ではない',
     suites: ['rescan', 'rescan-coding'],
@@ -148,6 +153,12 @@ const CLASSIFICATIONS = [
 ];
 
 const EXECUTION_OVERRIDES = {
+  'interactive-topic-boundary': {
+    defaultEligible: false,
+    credentials: ['claude', 'codex'],
+    cost: 'high',
+    reason: 'Claude Opus と Codex Luna Max で日英の話題境界を3反復測る',
+  },
   'frontend-opus': {
     defaultEligible: false,
     credentials: ['claude'],
@@ -427,6 +438,7 @@ const EXECUTION_OVERRIDES = {
 };
 
 const PREPARE_TARGET_OVERRIDES = {
+  'interactive-topic-boundary': [],
   'completion-scope-structured': [],
   'completion-scope-routing': [],
   'evidence-judgment': [],
