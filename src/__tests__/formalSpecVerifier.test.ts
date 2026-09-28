@@ -76,6 +76,7 @@ vi.mock('../shared/utils/spawn.js', () => ({
 
 import {
   detectJavaMajorVersion,
+  cleanupFormalSpecVerificationArtifacts,
   extractFormalSpecBlocks,
   runFormalSpecVerification,
   selectAlloyCheckTargets,
@@ -290,7 +291,7 @@ describe('runFormalSpecVerification', () => {
     }
   });
 
-  it('should remove a workspace after a synchronous spawn failure with no child returned', async () => {
+  it('should retain a synchronous spawn failure workspace until the interpretation cleanup', async () => {
     const directory = createTestDirectory();
     processBoundaryControls.throwOnSpawn = true;
 
@@ -299,6 +300,10 @@ describe('runFormalSpecVerification', () => {
 
       expect(result).toMatchObject({ verdict: 'error', verificationStarted: true });
       expect(mockSpawnManagedProcess).toHaveBeenCalledOnce();
+      expect(readdirSync(join(directory, '.takt', 'runs'))
+        .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
+      expect(result.artifacts?.runDirectory).toBeDefined();
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))
         .filter((name) => name.startsWith('verify-'))).toEqual([]);
     } finally {
@@ -357,6 +362,7 @@ describe('runFormalSpecVerification', () => {
 
       expect(result.alloy).toMatchObject({ status: 'passed', checks: checkNumbers });
       expect(retainedSpecifications).toEqual(checkNumbers.map(() => true));
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -378,6 +384,9 @@ describe('runFormalSpecVerification', () => {
 
       expect(result.verdict).toBe('failed');
       expect(result.alloy).toMatchObject({ status: 'failed', message: 'counterexample' });
+      expect(readdirSync(join(directory, '.takt', 'runs'))
+        .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))
         .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
     } finally {
@@ -883,6 +892,7 @@ describe('runFormalSpecVerification', () => {
       expect(spawnedProcesses.every(({ options }) => options.cwd?.includes('/.takt/runs/verify-'))).toBe(true);
       expect(spawnedProcesses.every(({ options }) => options.env?.TMPDIR === options.cwd)).toBe(true);
       const runParent = join(directory, '.takt', 'runs');
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(runParent).filter((name) => name.startsWith('verify-'))).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });

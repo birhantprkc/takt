@@ -278,6 +278,7 @@ export async function callClaudeTerminal(
     const command = buildClaudeTerminalCommand({
       pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable,
       internalAgentIsolation: options.internalAgentIsolation,
+      allowReadonlyFileRead: options.allowReadonlyFileRead,
       model: options.model,
       effort: options.effort,
       skillsEnabled: options.skillsEnabled,

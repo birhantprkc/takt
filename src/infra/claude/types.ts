@@ -105,6 +105,7 @@ export interface ClaudeCallOptions {
   abortSignal?: AbortSignal;
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
+  allowReadonlyFileRead?: boolean;
   allowedTools?: string[];
   /** MCP servers configuration */
   mcpServers?: Record<string, McpServerConfig>;
@@ -148,6 +149,7 @@ export interface ClaudeSpawnOptions {
   abortSignal?: AbortSignal;
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
+  allowReadonlyFileRead?: boolean;
   allowedTools?: string[];
   /** MCP servers configuration */
   mcpServers?: Record<string, McpServerConfig>;

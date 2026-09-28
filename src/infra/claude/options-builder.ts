@@ -81,7 +81,12 @@ export class SdkOptionsBuilder {
     };
 
     if (isStrictReadonly) {
-      sdkOptions.tools = [];
+      sdkOptions.tools = this.options.allowReadonlyFileRead === true
+        && this.options.permissionMode === 'readonly'
+        && this.options.allowedTools?.length === 1
+        && this.options.allowedTools[0] === 'Read'
+        ? ['Read']
+        : [];
       sdkOptions.skills = [];
       sdkOptions.strictMcpConfig = true;
     }

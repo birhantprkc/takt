@@ -23,6 +23,8 @@ export interface ProviderCallOptions {
   abortSignal?: AbortSignal;
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
+  /** Expose only the built-in Read tool for a strict read-only call. */
+  allowReadonlyFileRead?: boolean;
   model?: string;
   /** Per-call interactive reasoning effort override. */
   effort?: string;

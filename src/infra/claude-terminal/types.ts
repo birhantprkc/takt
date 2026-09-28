@@ -105,6 +105,7 @@ export interface ClaudeTerminalCallOptions {
   abortSignal?: AbortSignal;
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
+  allowReadonlyFileRead?: boolean;
   model?: string;
   effort?: string;
   skillsEnabled?: boolean;
@@ -136,6 +137,7 @@ export interface ClaudeTerminalCallOptions {
 export interface BuildClaudeTerminalCommandOptions {
   pathToClaudeCodeExecutable?: string;
   internalAgentIsolation?: InternalAgentIsolation;
+  allowReadonlyFileRead?: boolean;
   model?: string;
   effort?: string;
   skillsEnabled?: boolean;

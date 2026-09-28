@@ -1549,6 +1549,35 @@ describe('callClaudeHeadless', () => {
     expect(argv).not.toContain('--mcp-config');
   });
 
+  it('strict-readonly enables only Read when the interpretation call explicitly requests file access', async () => {
+    stubSpawn({
+      stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],
+      closeCode: 0,
+    });
+
+    await callClaudeHeadless('selector', 'read verification files', {
+      cwd: '/tmp',
+      internalAgentIsolation: 'strict-readonly',
+      allowReadonlyFileRead: true,
+      allowedTools: ['Read'],
+      permissionMode: 'readonly',
+    });
+
+    const argv = lastSpawnArgv();
+    expect(argv).toEqual(expect.arrayContaining([
+      '--tools',
+      'Read',
+      '--strict-mcp-config',
+      '--setting-sources',
+      '',
+      '--disable-slash-commands',
+      '--permission-mode',
+      'default',
+    ]));
+    expect(argv).not.toContain('--allowed-tools');
+    expect(argv).not.toContain('--mcp-config');
+  });
+
   it('passes --effort without --allowed-tools when tools list is empty', async () => {
     stubSpawn({
       stdoutChunks: [`${JSON.stringify({ type: 'text', text: 'x' })}\n`],

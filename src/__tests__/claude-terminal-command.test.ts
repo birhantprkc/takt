@@ -134,4 +134,27 @@ describe('Claude terminal command builder', () => {
     expect(command.args).not.toContain('--mcp-config');
   });
 
+  it('strict-readonly exposes only Read for an explicitly authorized verification interpretation', () => {
+    const command = buildClaudeTerminalCommand({
+      pathToClaudeCodeExecutable: 'claude',
+      internalAgentIsolation: 'strict-readonly',
+      allowReadonlyFileRead: true,
+      allowedTools: ['Read'],
+      permissionMode: 'readonly',
+    });
+
+    expect(command.args).toEqual(expect.arrayContaining([
+      '--tools',
+      'Read',
+      '--strict-mcp-config',
+      '--setting-sources',
+      '',
+      '--disable-slash-commands',
+      '--permission-mode',
+      'default',
+    ]));
+    expect(command.args).not.toContain('--allowed-tools');
+    expect(command.args).not.toContain('--mcp-config');
+  });
+
 });

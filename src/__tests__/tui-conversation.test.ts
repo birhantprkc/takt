@@ -46,6 +46,7 @@ vi.mock('../features/interactive/assistantInitFiles.js', () => ({
 
 vi.mock('../features/interactive/formalSpecVerification.js', () => ({
   runFormalSpecVerification: (...args: unknown[]) => mockRunFormalSpecVerification(...args),
+  cleanupFormalSpecVerificationArtifacts: () => undefined,
 }));
 
 vi.mock('../features/interactive/taskInstructionFormat.js', async (importOriginal) => ({
@@ -809,7 +810,9 @@ describe('TUI local commands', () => {
     expect(mockCallAIWithRetry.mock.calls[1]?.[5]).toEqual(expect.objectContaining({
       permissionMode: 'readonly',
       internalAgentIsolation: 'strict-readonly',
+      allowReadonlyFileRead: true,
     }));
+    expect(mockCallAIWithRetry.mock.calls[1]?.[2]).toEqual(['Read']);
     expect(chunks).toEqual([]);
   });
 

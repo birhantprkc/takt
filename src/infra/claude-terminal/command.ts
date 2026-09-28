@@ -28,7 +28,13 @@ export function buildClaudeTerminalCommand(
     args.push('--effort', options.effort);
   }
   if (isStrictReadonly) {
-    args.push('--tools', '', '--strict-mcp-config', '--setting-sources', '', '--disable-slash-commands');
+    const readOnlyTools = options.allowReadonlyFileRead === true
+      && options.permissionMode === 'readonly'
+      && options.allowedTools?.length === 1
+      && options.allowedTools[0] === 'Read'
+      ? 'Read'
+      : '';
+    args.push('--tools', readOnlyTools, '--strict-mcp-config', '--setting-sources', '', '--disable-slash-commands');
   } else if (options.skillsEnabled === false) {
     args.push('--disable-slash-commands');
   }
