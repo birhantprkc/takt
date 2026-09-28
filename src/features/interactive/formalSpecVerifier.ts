@@ -362,6 +362,21 @@ async function runProcess(
   let stdoutLogFd: number | undefined;
   let stderrLogFd: number | undefined;
   let artifactWriteError: string | undefined;
+  const closeLogFile = (fileDescriptor: number | undefined): undefined => {
+    if (fileDescriptor === undefined) {
+      return undefined;
+    }
+    try {
+      closeSync(fileDescriptor);
+    } catch (error) {
+      artifactWriteError ??= error instanceof Error ? error.message : String(error);
+    }
+    return undefined;
+  };
+  const closeLogFiles = (): void => {
+    stdoutLogFd = closeLogFile(stdoutLogFd);
+    stderrLogFd = closeLogFile(stderrLogFd);
+  };
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
     processAbortController.abort(new Error(`Process timed out after ${timeout} ms`));
@@ -425,6 +440,7 @@ async function runProcess(
     const exit = await managedProcess.wait();
     abortSignal?.throwIfAborted();
     if (timedOut) {
+      closeLogFiles();
       return {
         outcome: 'timeout',
         status: null,
@@ -436,6 +452,7 @@ async function runProcess(
         error: `Process timed out after ${timeout} ms`,
       };
     }
+    closeLogFiles();
     return {
       outcome: exit.signal === null ? 'exit' : 'signal',
       status: exit.code,
@@ -448,6 +465,7 @@ async function runProcess(
   } catch (error) {
     abortSignal?.throwIfAborted();
     if (timedOut) {
+      closeLogFiles();
       return {
         outcome: 'timeout',
         status: null,
@@ -459,6 +477,7 @@ async function runProcess(
         error: `Process timed out after ${timeout} ms`,
       };
     }
+    closeLogFiles();
     return {
       outcome: 'spawn_error',
       status: null,
@@ -470,20 +489,7 @@ async function runProcess(
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    if (stdoutLogFd !== undefined) {
-      try {
-        closeSync(stdoutLogFd);
-      } catch {
-        // A process result is more useful than a close error during teardown.
-      }
-    }
-    if (stderrLogFd !== undefined) {
-      try {
-        closeSync(stderrLogFd);
-      } catch {
-        // A process result is more useful than a close error during teardown.
-      }
-    }
+    closeLogFiles();
     clearTimeout(timeoutHandle);
     abortSignal?.removeEventListener('abort', onAbort);
   }
@@ -830,6 +836,9 @@ async function javaVersion(
   logPaths?: ProcessLogPaths,
 ): Promise<number | undefined> {
   const result = await runProcess('java', ['-version'], cwd, 10_000, abortSignal, logPaths);
+  if (result.artifactWriteError !== undefined) {
+    throw new Error(result.artifactWriteError);
+  }
   if (!isSuccessfulProcess(result)) {
     return undefined;
   }

@@ -40,9 +40,13 @@ const { failSpecsDirectoryCreation } = vi.hoisted(() => ({
   failSpecsDirectoryCreation: { enabled: false },
 }));
 
-const { failVerifyRunRemoval, processBoundaryControls } = vi.hoisted(() => ({
+const { failVerifyRunRemoval, processBoundaryControls, closeSyncControls } = vi.hoisted(() => ({
   failVerifyRunRemoval: { enabled: false },
   processBoundaryControls: { throwOnSpawn: false },
+  closeSyncControls: {
+    failNext: false,
+    attempts: [] as number[],
+  },
 }));
 
 vi.mock('node:fs', async () => {
@@ -66,6 +70,16 @@ vi.mock('node:fs', async () => {
         throw new Error('verify run cleanup failed');
       }
       return actual.rmSync(...args);
+    },
+    closeSync: (...args: Parameters<typeof actual.closeSync>) => {
+      const [fileDescriptor] = args;
+      closeSyncControls.attempts.push(fileDescriptor);
+      if (closeSyncControls.failNext) {
+        closeSyncControls.failNext = false;
+        actual.closeSync(...args);
+        throw new Error('artifact log close failed');
+      }
+      return actual.closeSync(...args);
     },
   };
 });
@@ -215,6 +229,8 @@ beforeEach(() => {
   failSpecsDirectoryCreation.enabled = false;
   failVerifyRunRemoval.enabled = false;
   processBoundaryControls.throwOnSpawn = false;
+  closeSyncControls.failNext = false;
+  closeSyncControls.attempts.length = 0;
   alloyJarDigestOverride.value = undefined;
   delete process.env.TAKT_ALLOY_JAR;
   mockProcessBoundary();
@@ -425,6 +441,59 @@ describe('runFormalSpecVerification', () => {
       const statusless = await runFormalSpecVerification(quintResponse, directory, { modelCheckTimeoutSeconds: 300 });
       expect(statusless.verdict).toBe('error');
       expect(statusless.quint.run).toMatchObject({ status: 'error' });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should fail a successful exit when closing its diagnostic artifact fails', async () => {
+    const directory = createTestDirectory();
+    closeSyncControls.failNext = true;
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.quint.parse).toMatchObject({ status: 'error' });
+      expect(result.quint.parse?.message).toContain('artifact log close failed');
+      expect(closeSyncControls.attempts).toHaveLength(2);
+      expect(new Set(closeSyncControls.attempts)).toHaveLength(2);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should retain a Java version artifact close error instead of skipping verification', async () => {
+    const directory = createTestDirectory();
+    processResponses.push(
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      {
+        code: 0,
+        stderr: 'openjdk version "17.0.1"',
+        beforeExit: async () => {
+          closeSyncControls.failNext = true;
+        },
+      },
+    );
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.message).toContain('artifact log close failed');
+      expect(result.quint.status).toBe('error');
+      expect(spawnedProcesses).toHaveLength(4);
+      expect(spawnedProcesses.at(-1)).toMatchObject({ command: 'java', args: ['-version'] });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
