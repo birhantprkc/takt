@@ -388,8 +388,13 @@ async function runProcess(
 
   try {
     if (logPaths) {
-      stdoutLogFd = openSync(logPaths.stdout, 'w', 0o600);
-      stderrLogFd = openSync(logPaths.stderr, 'w', 0o600);
+      try {
+        stdoutLogFd = openSync(logPaths.stdout, 'w', 0o600);
+        stderrLogFd = openSync(logPaths.stderr, 'w', 0o600);
+      } catch (error) {
+        artifactWriteError ??= error instanceof Error ? error.message : String(error);
+        throw error;
+      }
     }
     // A partially spawned process is killed with its tree through the abort
     // contract of spawnManagedProcess.

@@ -40,12 +40,17 @@ const { failSpecsDirectoryCreation } = vi.hoisted(() => ({
   failSpecsDirectoryCreation: { enabled: false },
 }));
 
-const { failVerifyRunRemoval, processBoundaryControls, closeSyncControls } = vi.hoisted(() => ({
+const { failVerifyRunRemoval, processBoundaryControls, closeSyncControls, openSyncControls } = vi.hoisted(() => ({
   failVerifyRunRemoval: { enabled: false },
   processBoundaryControls: { throwOnSpawn: false },
   closeSyncControls: {
     failNext: false,
     attempts: [] as number[],
+  },
+  openSyncControls: {
+    failPathSuffix: undefined as string | undefined,
+    attempts: [] as string[],
+    opened: [] as Array<{ path: string; fileDescriptor: number }>,
   },
 }));
 
@@ -59,6 +64,16 @@ vi.mock('node:fs', async () => {
         throw new Error('specs directory creation failed');
       }
       return actual.mkdirSync(...args);
+    },
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      const path = String(args[0]);
+      openSyncControls.attempts.push(path);
+      if (openSyncControls.failPathSuffix !== undefined && path.endsWith(openSyncControls.failPathSuffix)) {
+        throw new Error('artifact log open failed');
+      }
+      const fileDescriptor = actual.openSync(...args);
+      openSyncControls.opened.push({ path, fileDescriptor });
+      return fileDescriptor;
     },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       const options = args[1];
@@ -231,6 +246,9 @@ beforeEach(() => {
   processBoundaryControls.throwOnSpawn = false;
   closeSyncControls.failNext = false;
   closeSyncControls.attempts.length = 0;
+  openSyncControls.failPathSuffix = undefined;
+  openSyncControls.attempts.length = 0;
+  openSyncControls.opened.length = 0;
   alloyJarDigestOverride.value = undefined;
   delete process.env.TAKT_ALLOY_JAR;
   mockProcessBoundary();
@@ -493,6 +511,65 @@ describe('runFormalSpecVerification', () => {
       expect(result.message).toContain('artifact log close failed');
       expect(result.quint.status).toBe('error');
       expect(spawnedProcesses).toHaveLength(4);
+      expect(spawnedProcesses.at(-1)).toMatchObject({ command: 'java', args: ['-version'] });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['stdout', 'java-version.stdout.log'],
+    ['stderr', 'java-version.stderr.log'],
+  ])('should retain a Java version %s log open error instead of skipping verification', async (stream, pathSuffix) => {
+    const directory = createTestDirectory();
+    openSyncControls.failPathSuffix = pathSuffix;
+    processResponses.push({ code: 0 }, { code: 0 }, { code: 0 });
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.message).toContain('artifact log open failed');
+      expect(result.quint.status).toBe('error');
+      expect(spawnedProcesses).toHaveLength(3);
+
+      if (stream === 'stderr') {
+        const javaVersionStdout = openSyncControls.opened.find(({ path }) => path.endsWith('java-version.stdout.log'));
+        expect(javaVersionStdout).toBeDefined();
+        if (javaVersionStdout === undefined) {
+          throw new Error('Java version stdout log was not opened before stderr failed');
+        }
+        expect(closeSyncControls.attempts).toContain(javaVersionStdout.fileDescriptor);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should keep verification skipped when Java is unavailable and its diagnostic logs open', async () => {
+    const directory = createTestDirectory();
+    processResponses.push(
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      { error: new Error('spawn java ENOENT') },
+    );
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.quint.verify).toMatchObject({
+        status: 'skipped',
+        message: 'Java 17 or later was not detected; Quint verification was skipped.',
+      });
       expect(spawnedProcesses.at(-1)).toMatchObject({ command: 'java', args: ['-version'] });
     } finally {
       rmSync(directory, { recursive: true, force: true });
