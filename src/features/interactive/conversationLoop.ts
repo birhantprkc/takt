@@ -64,6 +64,7 @@ import {
   buildFormalSpecGenerationSystemPrompt,
   buildFormalSpecInterpretationPrompt,
   buildFormalSpecInterpretationSystemPrompt,
+  getFormalSpecVerificationArtifactPaths,
 } from './formalSpecPrompts.js';
 
 export { type CallAIResult, type SessionContext, callAIWithRetry } from './aiCaller.js';
@@ -273,6 +274,7 @@ export async function runConversationLoop(
         permissionMode?: PermissionMode;
         internalAgentIsolation?: InternalAgentIsolation;
         allowReadonlyFileRead?: boolean;
+        readonlyFileReadPaths?: string[];
         disableSessionRetry?: boolean;
         persistSession?: boolean;
         commitSession?: boolean;
@@ -306,6 +308,9 @@ export async function runConversationLoop(
             ? {}
             : { internalAgentIsolation: callOptions.internalAgentIsolation }),
           ...(callOptions.allowReadonlyFileRead ? { allowReadonlyFileRead: true } : {}),
+          ...(callOptions.readonlyFileReadPaths === undefined
+            ? {}
+            : { readonlyFileReadPaths: callOptions.readonlyFileReadPaths }),
           ...(callOptions.persistSession === undefined ? {} : { persistSession: callOptions.persistSession }),
         },
       );
@@ -442,6 +447,7 @@ export async function runConversationLoop(
             permissionMode: 'readonly',
             internalAgentIsolation: 'strict-readonly',
             allowReadonlyFileRead: true,
+            readonlyFileReadPaths: getFormalSpecVerificationArtifactPaths(verification),
             disableSessionRetry: true,
             persistSession: false,
             commitSession: false,

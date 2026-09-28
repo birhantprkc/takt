@@ -127,7 +127,7 @@ describe('SdkOptionsBuilder.build() — settingSources', () => {
     expect(options).not.toHaveProperty('mcpServers');
   });
 
-  it('strict-readonly can expose only Read when the interpretation call explicitly requests it', () => {
+  it('strict-readonly keeps Read disabled when no verification files are allowlisted', () => {
     const options = buildSdkOptions({
       cwd: '/test',
       internalAgentIsolation: 'strict-readonly',
@@ -136,7 +136,8 @@ describe('SdkOptionsBuilder.build() — settingSources', () => {
       permissionMode: 'readonly',
     });
 
-    expect(options.tools).toEqual(['Read']);
+    expect(options.tools).toEqual([]);
+    expect(options.hooks?.PreToolUse?.some(({ matcher }) => matcher === 'Read')).toBe(false);
     expect(options.permissionMode).toBe('default');
     expect(options.settingSources).toEqual([]);
     expect(options.strictMcpConfig).toBe(true);

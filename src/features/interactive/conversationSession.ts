@@ -31,6 +31,7 @@ import {
   buildFormalSpecGenerationSystemPrompt,
   buildFormalSpecInterpretationPrompt,
   buildFormalSpecInterpretationSystemPrompt,
+  getFormalSpecVerificationArtifactPaths,
 } from './formalSpecPrompts.js';
 
 export interface ConversationSessionStrategy {
@@ -534,6 +535,7 @@ export function createConversationSession(options: ConversationSessionOptions): 
           permissionMode: 'readonly',
           internalAgentIsolation: 'strict-readonly',
           allowReadonlyFileRead: true,
+          readonlyFileReadPaths: getFormalSpecVerificationArtifactPaths(verification),
           imageAttachments: interpretationImageAttachments,
           ...(input.onNotice ? { onNotice: input.onNotice } : {}),
         },

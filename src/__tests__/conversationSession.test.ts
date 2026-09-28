@@ -436,6 +436,7 @@ describe('conversation session application API', () => {
           permissionMode: 'readonly',
           internalAgentIsolation: 'strict-readonly',
           allowReadonlyFileRead: true,
+          readonlyFileReadPaths: [specificationPath, parseJsonPath, runLogPath, runErrorPath],
         }));
         return {
           result: { content: 'counterexample found', sessionId: 'session-1', success: true },

@@ -58,6 +58,9 @@ function toTerminalOptions(options: ProviderCallOptions): ClaudeTerminalCallOpti
     sessionId: options.sessionId,
     internalAgentIsolation: options.internalAgentIsolation,
     ...(options.allowReadonlyFileRead ? { allowReadonlyFileRead: true } : {}),
+    ...(options.readonlyFileReadPaths === undefined
+      ? {}
+      : { readonlyFileReadPaths: options.readonlyFileReadPaths }),
     model: options.model,
     effort: options.effort ?? claudeOptions?.effort,
     skillsEnabled,

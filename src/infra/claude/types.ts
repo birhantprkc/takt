@@ -106,6 +106,7 @@ export interface ClaudeCallOptions {
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
   allowReadonlyFileRead?: boolean;
+  readonlyFileReadPaths?: readonly string[];
   allowedTools?: string[];
   /** MCP servers configuration */
   mcpServers?: Record<string, McpServerConfig>;
@@ -150,6 +151,7 @@ export interface ClaudeSpawnOptions {
   sessionId?: string;
   internalAgentIsolation?: InternalAgentIsolation;
   allowReadonlyFileRead?: boolean;
+  readonlyFileReadPaths?: readonly string[];
   allowedTools?: string[];
   /** MCP servers configuration */
   mcpServers?: Record<string, McpServerConfig>;

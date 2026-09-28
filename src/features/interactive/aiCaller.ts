@@ -67,6 +67,7 @@ interface CallAIWithRetryOptions {
   permissionMode?: PermissionMode;
   internalAgentIsolation?: InternalAgentIsolation;
   allowReadonlyFileRead?: boolean;
+  readonlyFileReadPaths?: readonly string[];
   outputMode?: 'terminal' | 'silent';
   abortSignal?: AbortSignal;
   /**
@@ -346,6 +347,9 @@ export async function callAIWithRetry(
         ? {}
         : { internalAgentIsolation: options.internalAgentIsolation }),
       ...(options.allowReadonlyFileRead ? { allowReadonlyFileRead: true } : {}),
+      ...(options.readonlyFileReadPaths === undefined
+        ? {}
+        : { readonlyFileReadPaths: options.readonlyFileReadPaths }),
       providerOptions: ctx.providerOptions,
       effort: ctx.effort,
       abortSignal: abortController.signal,
