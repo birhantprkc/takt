@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildSummaryPrompt } from '../features/interactive/interactive-summary.js';
 import { buildInteractiveSystemPrompt } from '../features/interactive/conversationPlan.js';
+import { getLabel } from '../shared/i18n/index.js';
 import {
   buildFormalSpecGenerationPrompt,
   buildFormalSpecGenerationSystemPrompt,
@@ -19,6 +20,18 @@ function renderInteractivePrompt(
     formalSpecComments,
     grillMe,
   });
+}
+
+function renderAssistantRetryPrompt(lang: 'en' | 'ja', enabled: boolean): string {
+  const input = {
+    grillMe: false,
+    enableTellCommand: false,
+    enableAssistantRetryCommands: enabled,
+  };
+  return buildInteractiveSystemPrompt(
+    lang,
+    input as unknown as Parameters<typeof buildInteractiveSystemPrompt>[1],
+  );
 }
 
 function renderJapaneseSummaryPrompt(formalSpec: boolean, formalSpecComments = true): string {
@@ -78,6 +91,62 @@ describe('interactive formal specification prompt template wiring', () => {
       expect(withComments).not.toBe(withoutComments);
       expect(withComments.length).toBeGreaterThan(withoutComments.length);
       expect(withDefaultComments).toBe(withComments);
+    },
+  );
+});
+
+describe('assistant task retry prompt guidance', () => {
+  it.each(['en', 'ja'] as const)(
+    'describes task and run artifact locations and gates command guidance for %s',
+    (lang) => {
+      const available = renderAssistantRetryPrompt(lang, true);
+      const unavailable = renderAssistantRetryPrompt(lang, false);
+
+      for (const artifact of [
+        '.takt/tasks.yaml',
+        '.takt/runs/',
+        'logs/*.jsonl',
+        'meta.json',
+        'logs/',
+        'reports/',
+        'subworkflows/',
+        'trace.md',
+        'interventions.jsonl',
+        'order.md',
+        'UTC',
+        'status',
+        'failure',
+        'worktree_path',
+        'task_dir',
+        'source_run_slug',
+        'run_slug',
+        'start_step',
+        'resume_mode',
+        'resume_point',
+        'restart_point',
+        'retry_note',
+        'exceeded_',
+        'step_complete',
+        'phase_complete',
+      ]) {
+        expect(available).toContain(artifact);
+      }
+      expect(available).toContain('/requeue');
+      expect(available).toContain('/retry');
+      expect(available).toContain(lang === 'en'
+        ? 'Both commands ask for confirmation and leave the workflow pending.'
+        : 'どちらも確認後は pending に戻り、workflow はその場で開始しません。');
+      expect(unavailable).toContain(getLabel(
+        'interactive.ui.assistantRetryUnavailableGuidance',
+        lang,
+      ));
+      if (lang === 'en') {
+        expect(unavailable).not.toContain('Web UI cannot change task state');
+      } else {
+        expect(unavailable).not.toContain('Web UI からタスク状態を変更できない');
+      }
+      expectNoUnexpandedTemplateVariables(available);
+      expectNoUnexpandedTemplateVariables(unavailable);
     },
   );
 });

@@ -57,7 +57,7 @@ Central workflow bundles keep ordinary MCP configuration portable. Non-credentia
 
 A mode where you refine task content through conversation with AI before execution. Useful when task requirements are ambiguous or when you want to clarify content while consulting with AI.
 
-The ordinary assistant conversation can also read compact task and run state through read-only MCP tools. Ask about the task by name or summary; the assistant reads detailed logs and reports only for a run you identify. When the requested change is ready, use `/go` for a new task or `/tell` for an additional instruction to a running worktree-clone task.
+The ordinary assistant conversation can also read compact task and run state through read-only MCP tools. Ask about the task by name or summary; the assistant reads detailed logs and reports only for a run you identify. When the requested change is ready, use `/go` for a new task, `/tell` for an additional instruction to a running worktree-clone task, or `/requeue` and `/retry` to return a failed task to the queue.
 
 ```bash
 # Start interactive mode (no arguments)
@@ -97,8 +97,12 @@ In the TUI conversation history, submitted user messages are shown with a full-w
 | `/model <value>` | Use a free-form model override for this conversation. |
 | `/effort <value>` | Use a free-form reasoning effort override for this conversation. |
 | `/tell [instruction]` | Select a running worktree-clone task, review an additional instruction, and send it after confirmation. With no inline instruction, the full conversation is converted into a standalone additional-instruction body. An interactive terminal is required; no instruction is sent when confirmation is unavailable. |
+| `/requeue [guidance]` | In an assistant or grill-me conversation, resolve a failed or exceeded task from the conversation. Select a start position for a failed task; an exceeded task keeps its saved stopping position. Show the task details, then ask for Y/n confirmation. The inline text is guidance, not a task name. |
+| `/retry [guidance]` | In an assistant or grill-me conversation, resolve a failed task from the conversation and prepare a complete revised order for Save task / Continue confirmation. The inline text is guidance, not a task name. |
 
 `/tell` is available in the ordinary CLI/TUI `assistant`, `grill-me`, and `persona` conversations, including after switching between those modes. It still requires a running task backed by a valid TAKT-managed worktree clone when selecting a recipient. The Web UI does not execute the local `/tell` handoff; text such as `/tell review this task` is sent to the assistant as a regular message. Dedicated Retry and Instruct conversations do not expose `/tell`; use their task-action controls instead.
+
+`/requeue` and the assistant-conversation form of `/retry` are available only in CLI/TUI `assistant` and `grill-me` conversations. `/requeue` considers failed and exceeded tasks; `/retry` considers failed tasks. The assistant chooses the task and, for failed tasks, the start position from the conversation. If there is no eligible task or the task is ambiguous, TAKT returns a notice without showing a confirmation. `/requeue` displays the task name, summary, workflow, and start position, then asks for Y/n; approval returns it to `pending` without changing `order.md`. `/retry` displays those details and the complete revised `order.md`; **Save task** archives the prior order and returns the task to `pending`, while **Continue** returns to the conversation without changes. Neither command starts a workflow. An interactive terminal is required. In persona conversations and the Web UI, these strings are ordinary messages. The existing `/retry` handling in the dedicated `takt resume` direct-retry conversation remains separate.
 
 Selections are temporary and are not persisted. Workflow, mode, provider, and model changes create a new AI session on the next ordinary message or `/go`; the prior transcript is included once as reference context. An effort-only change applies to the next call in the current session. Changing provider clears temporary model and effort overrides. If multiple settings commands are run before the next input, only the most recently selected value for each setting is applied. These conversation overrides do not affect workflow execution.
 

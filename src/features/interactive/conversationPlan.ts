@@ -76,6 +76,8 @@ export interface InteractiveSystemPromptInput {
   grillMe: boolean;
   /** Whether this front-end can hand off a running task with `/tell`. */
   enableTellCommand?: boolean;
+  /** Whether assistant task requeue commands are available in this conversation. */
+  enableAssistantRetryCommands?: boolean;
   formalSpec?: boolean;
   formalSpecComments?: boolean;
   workflowContext?: WorkflowContext;
@@ -92,12 +94,18 @@ export function buildInteractiveSystemPrompt(
     ? formatRunSessionForPrompt(input.runSessionContext)
     : EMPTY_RUN_SESSION_VARS;
   const enableTellCommand = input.enableTellCommand ?? true;
+  const enableAssistantRetryCommands = input.enableAssistantRetryCommands ?? true;
   const tellAvailable = enableTellCommand;
   const formalSpec = input.formalSpec ?? false;
 
   return loadTemplate('score_interactive_system_prompt', lang, {
     grillMe: input.grillMe,
     tellAvailable,
+    assistantRetryCommandsAvailable: enableAssistantRetryCommands,
+    assistantRetryUnavailableGuidance: getLabel(
+      'interactive.ui.assistantRetryUnavailableGuidance',
+      lang,
+    ),
     investigationPolicy: serializeInvestigationPolicy(INTERACTIVE_INVESTIGATION_POLICY),
     formalSpec,
     formalSpecComments: input.formalSpecComments ?? true,
@@ -139,6 +147,8 @@ export interface AssistantConversationInput {
   assistantMode: AssistantInteractiveMode;
   /** Whether this front-end can hand off a running task with `/tell`. */
   enableTellCommand?: boolean;
+  /** Whether this front-end can run local assistant task requeue commands. */
+  enableAssistantRetryCommands?: boolean;
   /** Initial values resolved by the front-end before the conversation starts. */
   formalSpec: boolean;
   /** Whether formal notation blocks must include natural-language meaning comments. */
@@ -178,6 +188,7 @@ interface ConversationSessionResolution {
 interface ConversationSessionOverrides extends ConversationSessionResolution {
   /** Whether this front-end can hand off a running task with `/tell`. */
   enableTellCommand?: boolean;
+  enableAssistantRetryCommands?: boolean;
   /** Resolved timeout for Quint model checking and Alloy verification stages. */
   modelCheckTimeoutSeconds: number;
   effort?: string;
@@ -224,6 +235,7 @@ export function createAssistantConversationPlan(
   };
   const grillMe = input.assistantMode === 'grill-me';
   const enableTellCommand = input.enableTellCommand ?? true;
+  const enableAssistantRetryCommands = input.enableAssistantRetryCommands ?? true;
   const assistantInitContext = loadAssistantInitContext(cwd);
   const initialPromptContext = [
     assistantInitContext,
@@ -243,6 +255,7 @@ export function createAssistantConversationPlan(
     systemPrompt: buildInteractiveSystemPrompt(ctx.lang, {
       grillMe,
       enableTellCommand,
+      enableAssistantRetryCommands,
       formalSpec: formalSpecConfiguration.mode,
       formalSpecComments: formalSpecConfiguration.comments,
       ...(input.workflowContext ? { workflowContext: input.workflowContext } : {}),
@@ -285,6 +298,7 @@ export function createAssistantConversationPlan(
       ...(initialPromptContext ? { initialPromptContext } : {}),
       ...(assistantInitContext ? { summaryPromptContext: assistantInitContext } : {}),
       enableTellCommand,
+      enableAssistantRetryCommands,
       ...(input.initialReferenceRunSlug === undefined
         ? {}
         : { initialReferenceRunSlug: input.initialReferenceRunSlug }),
@@ -317,7 +331,10 @@ export function createPersonaConversationPlan(
   return {
     ctx,
     strategy: {
-      systemPrompt: prependSourceContextGuardToSystemPrompt(ctx.lang, firstStep.personaContent),
+      systemPrompt: [
+        prependSourceContextGuardToSystemPrompt(ctx.lang, firstStep.personaContent),
+        getLabel('interactive.ui.assistantRetryUnavailableGuidance', ctx.lang),
+      ].join('\n\n'),
       formalSpec: false,
       modelCheckTimeoutSeconds: overrides.modelCheckTimeoutSeconds,
       allowedTools: firstStep.allowedTools.length > 0
@@ -330,6 +347,7 @@ export function createPersonaConversationPlan(
         ctx.lang,
       )} [${firstStep.personaDisplayName}]`,
       enableTellCommand,
+      enableAssistantRetryCommands: false,
     },
   };
 }

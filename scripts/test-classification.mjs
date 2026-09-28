@@ -354,6 +354,7 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/it-task-restart-point.test.ts',
   'src/__tests__/it-web-ui-chat-tell.test.ts',
   'src/__tests__/it-workflow-loader.test.ts',
+  'src/__tests__/it-workflow-maker-retry-availability.test.ts',
   'src/__tests__/it-workflow-policy.test.ts',
   'src/__tests__/kiro-provider-integration.test.ts',
   'src/__tests__/mcp-entrypoint.integration.test.ts',

@@ -48,7 +48,7 @@ You can also save tasks from interactive mode. After refining requirements throu
 
 MCP clients can use the `takt-mcp` stdio server to save pending tasks, inspect task/run state, and send additional instructions to running worktree-clone tasks without invoking shell commands. `takt_enqueue_task` writes a pending record to `.takt/tasks.yaml`; `takt_list_tasks` returns compact summaries, `takt_get_run` reads one run's details, and `takt_tell_run` rechecks and writes only to a running clone. If saving fails after issue creation and the issue number was resolved, the issue remains open and the MCP error result returns its number for retry. If number extraction fails, the result can provide the issue URL instead. The tools require an absolute `cwd` inside the server's allowed project root; enqueue and tell also require non-empty task content. Use `takt run` to execute pending tasks or `takt watch` to monitor and execute them continuously. See [CLI Reference](./cli-reference.md#mcp-server) for setup and tool input details.
 
-The ordinary assistant conversation receives only the read-only task-state tools when its provider supports MCP. Use `/go` for a new task and `/tell` to select, review, and confirm an additional instruction for a running worktree clone. A provider without MCP support keeps the conversation available but cannot look up task state.
+The ordinary assistant conversation receives only the read-only task-state tools when its provider supports MCP. Use `/go` for a new task, `/tell` to select, review, and confirm an additional instruction for a running worktree clone, or `/requeue` and `/retry` to return a failed task to the queue. A provider without MCP support keeps the conversation available but cannot look up task state.
 
 ## Task Directory Format
 
@@ -214,6 +214,8 @@ The list view shows all tasks organized by status (pending, running, completed, 
 | **Create PR** | Commit, push, and create a pull request from the failed run's changes |
 | **Delete** | Remove the failed task record |
 
+In CLI/TUI assistant and grill-me conversations, `/requeue [guidance]` resolves a failed task and start position from the conversation, shows the task name, summary, workflow, and start position, then asks for Y/n. Approval returns the task to `pending` without changing its `order.md`. `/retry [guidance]` resolves a failed task from the conversation and shows a complete revised order with **Save task** and **Continue** choices. **Save task** archives the previous order and returns the task to `pending`; **Continue** makes no task changes and returns to the conversation. Inline text is guidance for resolving the conversation, not a task name. Ambiguous targets and an empty candidate set return a notice without confirmation. Neither command starts a worker; both require an interactive terminal. Persona conversations and the Web UI treat these strings as ordinary messages. The direct-run `/retry` flow in `takt resume` remains separate.
+
 ### Actions for Pending Tasks
 
 | Action | Description |
@@ -234,6 +236,8 @@ Selecting a running task with a worktree clone opens the ordinary assistant conv
 |--------|-------------|
 | **Requeue** | Return the task to `pending`, resuming from where it stopped |
 | **Delete** | Remove the task permanently |
+
+`/requeue` can also target an exceeded task. It confirms the task and its stopped position, then returns it to `pending` while preserving the existing resume information. It does not offer a start-position choice or start a worker.
 
 ### Actions for PR-Failed Tasks
 

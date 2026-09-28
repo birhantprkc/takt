@@ -39,6 +39,7 @@ const {
   mockTakeSessionState,
   mockResolveAssistantProviderModel,
   mockRunTellCommand,
+  mockRunAssistantRetryCommand,
   mockInfo,
   mockWatchProcessExit,
   mockReleaseProcessExit,
@@ -59,6 +60,7 @@ const {
   mockTakeSessionState: vi.fn(),
   mockResolveAssistantProviderModel: vi.fn(),
   mockRunTellCommand: vi.fn(),
+  mockRunAssistantRetryCommand: vi.fn(),
   mockInfo: vi.fn(),
   mockWatchProcessExit: vi.fn(),
   mockReleaseProcessExit: vi.fn(),
@@ -110,6 +112,10 @@ vi.mock('../features/interactive/providerSelection.js', () => ({
 
 vi.mock('../features/interactive/tellCommand.js', () => ({
   runTellCommand: (...args: unknown[]) => mockRunTellCommand(...args),
+}));
+
+vi.mock('../features/interactive/assistantRetryCommand.js', () => ({
+  runAssistantRetryCommand: (...args: unknown[]) => mockRunAssistantRetryCommand(...args),
 }));
 
 vi.mock('../features/interactive/assistantConfig.js', () => ({
@@ -246,6 +252,7 @@ function createConversationDouble(overrides: Partial<TuiConversation> = {}): Tui
     resumeSession: vi.fn(),
     recordRejectedDraft: vi.fn(),
     snapshotHistory: vi.fn(() => []),
+    getSessionId: vi.fn(() => undefined),
     setEffort: vi.fn(),
     pasteClipboardImage: vi.fn(),
     sealImages: vi.fn(),
@@ -313,6 +320,7 @@ beforeEach(() => {
   }));
   mockSelectRecentSession.mockResolvedValue(null);
   mockRunTellCommand.mockResolvedValue('The instruction was sent.');
+  mockRunAssistantRetryCommand.mockResolvedValue('The task was queued.');
   mockSelectAction.mockResolvedValue('execute');
   mockLoadPersonaSessions.mockReturnValue({});
   mockTakeSessionState.mockReturnValue(null);
@@ -410,6 +418,121 @@ describe('runTui', () => {
       { history: [], queue: [] },
     );
     await run;
+  });
+
+  it('routes the assistant /retry handoff through the shared handler and resumes the conversation', async () => {
+    const history = [
+      { role: 'user' as const, content: 'The diagnostics task fails in review.' },
+      { role: 'assistant' as const, content: 'The task is fix-quint-diagnostics.' },
+    ];
+    const conversation = createConversationDouble({
+      snapshotHistory: vi.fn(() => history),
+    });
+    mockCreateTuiConversation.mockReturnValue(conversation);
+    const tree = scriptRender();
+    const run = startRun();
+    await waitForMount(tree, 1);
+
+    tree.conversationProps().onExit(
+      { kind: 'handoff', id: 'assistant-retry', text: 'restart from the beginning' },
+      { history: [], queue: [] },
+    );
+    await waitForMount(tree, 2);
+
+    expect(mockRunAssistantRetryCommand).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/repo',
+      lang: 'en',
+      command: 'retry',
+      inlineText: 'restart from the beginning',
+      history,
+      sessionContext: expect.objectContaining({
+        providerType: 'mock',
+        lang: 'en',
+        sessionId: undefined,
+      }),
+      formalSpec: expect.any(Boolean),
+    }));
+    expect(mockCreateTuiConversation).toHaveBeenCalledTimes(1);
+    expect(tree.conversationProps().initialEntries).toEqual([{
+      role: 'system',
+      content: 'The task was queued.',
+    }]);
+
+    tree.conversationProps().onExit(
+      { kind: 'result', result: { action: 'cancel', task: '' } },
+      { history: [], queue: [] },
+    );
+    await run;
+  });
+
+  it('routes the assistant /requeue handoff as requeue through the shared handler', async () => {
+    const conversation = createConversationDouble();
+    mockCreateTuiConversation.mockReturnValue(conversation);
+    const tree = scriptRender();
+    const run = startRun();
+    await waitForMount(tree, 1);
+
+    tree.conversationProps().onExit(
+      { kind: 'handoff', id: 'assistant-requeue', text: 'resume from review' },
+      { history: [], queue: [] },
+    );
+    await waitForMount(tree, 2);
+
+    expect(mockRunAssistantRetryCommand).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'requeue',
+      inlineText: 'resume from review',
+      sessionContext: expect.objectContaining({ sessionId: undefined }),
+    }));
+
+    tree.conversationProps().onExit(
+      { kind: 'result', result: { action: 'cancel', task: '' } },
+      { history: [], queue: [] },
+    );
+    await run;
+  });
+
+  it.each([
+    { label: 'without a resumed session', selectedSession: null, expectedSessionId: undefined },
+    { label: 'after /resume', selectedSession: 'session-abc', expectedSessionId: 'session-abc' },
+  ])('passes the current provider session to /retry $label', async ({ selectedSession, expectedSessionId }) => {
+    let currentSessionId: string | undefined;
+    const conversation: TuiConversation = {
+      ...createConversationDouble({ snapshotHistory: vi.fn(() => []) }),
+      resumeSession: vi.fn(async (sessionId: string) => {
+        currentSessionId = sessionId;
+        return undefined;
+      }),
+      getSessionId: vi.fn(() => currentSessionId),
+    };
+    mockCreateTuiConversation.mockReturnValue(conversation);
+    const tree = scriptRender();
+    const run = startRun();
+    await waitForMount(tree, 1);
+
+    if (selectedSession !== null) {
+      await tree.conversationProps().conversation.resumeSession(selectedSession);
+    }
+
+    const mountCount = tree.mounts.count;
+    tree.conversationProps().onExit(
+      { kind: 'handoff', id: 'assistant-retry', text: '' },
+      { history: [], queue: [] },
+    );
+    await waitForMount(tree, mountCount + 1);
+
+    const call = mockRunAssistantRetryCommand.mock.calls[0]?.[0] as {
+      history: readonly unknown[];
+      sessionContext: { sessionId?: string };
+    };
+    expect(call.history).toEqual([]);
+    const handedOffSessionId = call.sessionContext.sessionId;
+
+    tree.conversationProps().onExit(
+      { kind: 'result', result: { action: 'cancel', task: '' } },
+      { history: [], queue: [] },
+    );
+    await run;
+    expect(handedOffSessionId).toBe(expectedSessionId);
   });
 
   it('should report a cancelled workflow selection without mounting Ink', async () => {
