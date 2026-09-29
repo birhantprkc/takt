@@ -1016,6 +1016,16 @@ export async function fetchCacciaPullRequestDetails(
   };
 }
 
+/** Reads the current PR head SHA without fetching the additional clone metadata. */
+export async function fetchCacciaPullRequestHeadSha(
+  prNumber: number,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const locator = await fetchPullRequestLocatorAsync(prNumber, cwd, undefined, signal);
+  return locator.headSha;
+}
+
 /** Resolves the supplied GitHub review thread through its GraphQL thread ID. */
 export async function resolveReviewThread(threadId: string, cwd: string, signal?: AbortSignal): Promise<void> {
   const raw = await runGhCommand(

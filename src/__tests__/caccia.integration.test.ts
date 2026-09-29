@@ -114,6 +114,7 @@ describe('Caccia report lifecycle', () => {
       createTemporaryClone: vi.fn(async () => ({ cwd: cloneCwd })),
       executeWorkflow,
       commitAndPush: vi.fn(async () => ({ headSha: 'pushed-head' })),
+      fetchCurrentPullRequestHeadSha: vi.fn(async () => 'pushed-head'),
       resolveReviewThread: vi.fn(async () => undefined),
       removeTemporaryClone,
       logResult: vi.fn(),

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { resolveConfigValue } from '../../infra/config/index.js';
 import {
   fetchCacciaPullRequestDetails,
+  fetchCacciaPullRequestHeadSha,
   fetchCodeRabbitReviewStatus,
   fetchCodeRabbitReviewThreads,
   resolveReviewThread,
@@ -137,6 +138,11 @@ export interface CacciaDependencies {
     task: string;
   }): Promise<{ reportPath: string; decisions: CacciaWorkflowDecision[] }>;
   commitAndPush(cwd: string): Promise<{ headSha: string }>;
+  fetchCurrentPullRequestHeadSha(
+    prNumber: number,
+    projectCwd: string,
+    signal?: AbortSignal,
+  ): Promise<string>;
   resolveReviewThread(threadId: string, projectCwd: string, signal?: AbortSignal): Promise<void>;
   removeTemporaryClone(cwd: string): Promise<void>;
   logResult(result: CacciaResult): void;
@@ -353,6 +359,8 @@ function createProductionDependencies(input: CacciaInput): CacciaDependencies {
     createTemporaryClone: (prNumber, expectedHeadSha) => createTemporaryClone(input, prNumber, expectedHeadSha),
     executeWorkflow: (options) => executeCacciaWorkflow(input, options),
     commitAndPush: (cwd) => commitAndPush(cwd, input.projectCwd, input.abortSignal),
+    fetchCurrentPullRequestHeadSha: (prNumber, projectCwd, signal) =>
+      fetchCacciaPullRequestHeadSha(prNumber, projectCwd, signal),
     resolveReviewThread: (threadId, projectCwd, signal) => resolveReviewThread(threadId, projectCwd, signal),
     removeTemporaryClone: async (cwd) => removeOwnedTemporaryClone(cwd, false),
     logResult: logCacciaResult,
@@ -476,6 +484,16 @@ async function runCacciaWithDependencies(
         assertEveryThreadWasDecided(threads, workflowResult.decisions);
         const pushResult = await dependencies.commitAndPush(clone.cwd);
         for (const thread of threads) {
+          const currentHeadSha = await dependencies.fetchCurrentPullRequestHeadSha(
+            prNumber,
+            input.projectCwd,
+            input.abortSignal,
+          );
+          if (currentHeadSha !== pushResult.headSha) {
+            throw new Error(
+              `Pull request #${prNumber} head changed before resolving review thread ${thread.id}`,
+            );
+          }
           await dependencies.resolveReviewThread(thread.id, input.projectCwd, input.abortSignal);
         }
         return pushResult;

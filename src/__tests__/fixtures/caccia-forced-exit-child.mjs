@@ -80,6 +80,7 @@ mock.module(githubModule, {
       headSha,
       headRepositorySshUrl: remote,
     }),
+    fetchCacciaPullRequestHeadSha: () => headSha,
     fetchCodeRabbitReviewStatus: () => ({
       headSha,
       hasCodeRabbitPost: true,

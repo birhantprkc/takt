@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const {
   mockMkdtempSync,
   mockFetchCacciaPullRequestDetails,
+  mockFetchCacciaPullRequestHeadSha,
   mockFetchCodeRabbitReviewStatus,
   mockActualFetchCodeRabbitReviewStatus,
   mockFetchCodeRabbitReviewThreads,
@@ -17,6 +18,7 @@ const {
 } = vi.hoisted(() => ({
   mockMkdtempSync: vi.fn(),
   mockFetchCacciaPullRequestDetails: vi.fn<(...args: unknown[]) => unknown>(),
+  mockFetchCacciaPullRequestHeadSha: vi.fn<(...args: unknown[]) => unknown>(),
   mockFetchCodeRabbitReviewStatus: vi.fn<(...args: unknown[]) => unknown>(),
   mockActualFetchCodeRabbitReviewStatus: vi.fn<(...args: unknown[]) => unknown>(),
   mockFetchCodeRabbitReviewThreads: vi.fn<(...args: unknown[]) => unknown>(),
@@ -43,6 +45,8 @@ vi.mock('../infra/github/pr.js', async (importOriginal) => {
     ...actual,
     fetchCacciaPullRequestDetails: (...args: unknown[]) =>
       Reflect.apply(mockFetchCacciaPullRequestDetails, undefined, args),
+    fetchCacciaPullRequestHeadSha: (...args: unknown[]) =>
+      Reflect.apply(mockFetchCacciaPullRequestHeadSha, undefined, args),
     fetchCodeRabbitReviewStatus: (...args: unknown[]) =>
       Reflect.apply(mockFetchCodeRabbitReviewStatus, undefined, args),
     fetchCodeRabbitReviewThreads: (...args: unknown[]) =>
@@ -568,6 +572,8 @@ describe('Caccia real Git isolation', () => {
         headRepositorySshUrl: bareRemote,
       };
     });
+    mockFetchCacciaPullRequestHeadSha.mockImplementation(() =>
+      git(bareRemote, ['rev-parse', `refs/heads/${branch}`]));
     mockFetchCodeRabbitReviewStatus.mockImplementation(() => {
       const headSha = git(bareRemote, ['rev-parse', `refs/heads/${branch}`]);
       return { headSha, hasCodeRabbitPost: true, reviewedHeadShas: [headSha] };

@@ -6,6 +6,7 @@ import {
   fetchCodeRabbitReviewStatus,
   fetchCodeRabbitReviewThreads,
   fetchCacciaPullRequestDetails,
+  fetchCacciaPullRequestHeadSha,
   findExistingPr,
   mergePr,
   resolveReviewThread,
@@ -774,6 +775,21 @@ describe('GitHub PR command boundary', () => {
     for (const [, , options] of execFile.mock.calls) {
       expect(options).toMatchObject({ signal: abortController.signal });
     }
+  });
+
+  it('reads the current Caccia PR head with an abortable locator request', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses({
+      url: 'https://github.com/org/repo/pull/7',
+      headRefOid: 'head-7',
+    });
+
+    await expect(fetchCacciaPullRequestHeadSha(7, '/project', abortController.signal)).resolves.toBe('head-7');
+
+    expect(execFile).toHaveBeenCalledTimes(1);
+    expect(execFile.mock.calls[0]?.[1]).toEqual(['pr', 'view', '7', '--json', 'url,headRefOid']);
+    expect(execFile.mock.calls[0]?.[2]).toMatchObject({ signal: abortController.signal });
+    expect(execFileSync).not.toHaveBeenCalled();
   });
 
   it('does not treat a dismissed CodeRabbit review as a completed review', async () => {

@@ -26,6 +26,7 @@ function createHarness(threadPages: CacciaReviewThread[][] = [[]]) {
   const events: string[] = [];
   let cloneNumber = 0;
   let pushNumber = 0;
+  let currentHeadSha = 'reviewed-head';
   const pages = [...threadPages];
 
   const dependencies: CacciaDependencies = {
@@ -62,7 +63,12 @@ function createHarness(threadPages: CacciaReviewThread[][] = [[]]) {
     commitAndPush: vi.fn(async (cwd) => {
       pushNumber += 1;
       events.push(`push:${cwd}`);
-      return { headSha: `pushed-head-${pushNumber}` };
+      currentHeadSha = `pushed-head-${pushNumber}`;
+      return { headSha: currentHeadSha };
+    }),
+    fetchCurrentPullRequestHeadSha: vi.fn(async () => {
+      events.push(`verify-head:${currentHeadSha}`);
+      return currentHeadSha;
     }),
     resolveReviewThread: vi.fn(async (threadId, cwd) => {
       events.push(`resolve:${threadId}:${cwd}`);
@@ -556,6 +562,8 @@ describe('Caccia loop', () => {
     expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('invalid-finding', '/project', expect.any(AbortSignal));
     expect(events.indexOf('push:/tmp/caccia-clone-1'))
       .toBeLessThan(events.indexOf('resolve:valid-finding:/project'));
+    expect(events.indexOf('verify-head:pushed-head-1'))
+      .toBeLessThan(events.indexOf('resolve:valid-finding:/project'));
   });
 
   it('does not resolve threads or wait for another review when pushing fails', async () => {
@@ -568,6 +576,54 @@ describe('Caccia loop', () => {
     expect(dependencies.resolveReviewThread).not.toHaveBeenCalled();
     expect(dependencies.waitForCodeRabbitReview).toHaveBeenCalledTimes(1);
     expect(dependencies.removeTemporaryClone).toHaveBeenCalledWith('/tmp/caccia-clone-1');
+  });
+
+  it('does not resolve threads when the workflow-created local commit was not pushed', async () => {
+    const { dependencies } = createHarness([[thread('finding-1')]]);
+    vi.mocked(dependencies.commitAndPush).mockResolvedValue({ headSha: 'workflow-local-commit' });
+
+    await expect(runCaccia(standaloneInput(), dependencies))
+      .rejects.toThrow('head changed before resolving review thread finding-1');
+
+    expect(dependencies.fetchCurrentPullRequestHeadSha).toHaveBeenCalledWith(
+      42,
+      '/project',
+      expect.any(AbortSignal),
+    );
+    expect(dependencies.resolveReviewThread).not.toHaveBeenCalled();
+    expect(dependencies.waitForCodeRabbitReview).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not resolve threads after the PR head advances beyond the pushed commit', async () => {
+    const { dependencies } = createHarness([[thread('finding-1')]]);
+    vi.mocked(dependencies.fetchCurrentPullRequestHeadSha).mockResolvedValue('concurrent-head');
+
+    await expect(runCaccia(standaloneInput(), dependencies))
+      .rejects.toThrow('head changed before resolving review thread finding-1');
+
+    expect(dependencies.commitAndPush).toHaveBeenCalledWith('/tmp/caccia-clone-1');
+    expect(dependencies.fetchCurrentPullRequestHeadSha).toHaveBeenCalledTimes(1);
+    expect(dependencies.resolveReviewThread).not.toHaveBeenCalled();
+    expect(dependencies.waitForCodeRabbitReview).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks the PR head before resolving each thread', async () => {
+    const findings = [thread('finding-1'), thread('finding-2')];
+    const { dependencies } = createHarness([findings]);
+    vi.mocked(dependencies.fetchCurrentPullRequestHeadSha)
+      .mockResolvedValueOnce('pushed-head-1')
+      .mockResolvedValueOnce('concurrent-head');
+
+    await expect(runCaccia(standaloneInput(), dependencies))
+      .rejects.toThrow('head changed before resolving review thread finding-2');
+
+    expect(dependencies.fetchCurrentPullRequestHeadSha).toHaveBeenCalledTimes(2);
+    expect(dependencies.resolveReviewThread).toHaveBeenCalledTimes(1);
+    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith(
+      'finding-1',
+      '/project',
+      expect.any(AbortSignal),
+    );
   });
 
   it('removes the temporary clone when resolving a later thread fails', async () => {
