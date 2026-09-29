@@ -37,7 +37,8 @@ describe('boundPersistedFailureText', () => {
 
     const result = boundPersistedFailureText(huge);
 
-    expect(() => Buffer.from(result, 'utf-8').toString('utf-8')).not.toThrow();
+    expect(Buffer.byteLength(result, 'utf-8')).toBeLessThanOrEqual(MAX_PERSISTED_FAILURE_ERROR_BYTES);
+    expect(Buffer.from(result, 'utf-8').toString('utf-8')).toBe(result);
     expect(result.includes('�')).toBe(false);
   });
 });

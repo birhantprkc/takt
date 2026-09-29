@@ -1,3 +1,4 @@
+import { MAX_PERSISTED_FAILURE_ERROR_BYTES } from '../shared/utils/persistedFailureText.js';
 import { describe, it, expect } from 'vitest';
 import {
   TaskRecordSchema,
@@ -604,7 +605,7 @@ describe('TaskRecordSchema', () => {
 
       expect(parsed.failure?.error.length).toBeLessThan(hugeError.length);
       expect(parsed.failure?.error).toMatch(/\[TRUNCATED: \d+ bytes\]$/);
-      expect(Buffer.byteLength(parsed.failure?.error ?? '', 'utf-8')).toBeLessThanOrEqual(8 * 1024);
+      expect(Buffer.byteLength(parsed.failure?.error ?? '', 'utf-8')).toBeLessThanOrEqual(MAX_PERSISTED_FAILURE_ERROR_BYTES);
     });
 
     it('should leave an already-bounded failure.error unchanged on re-parse (idempotent)', () => {

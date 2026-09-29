@@ -988,7 +988,7 @@ function validateTask(task: CentralTaskRecord): void {
 export function parseCentralTasks(value: unknown): readonly CentralTaskRecord[] {
   const parsed = parseTasks(value);
   parsed.tasks.forEach(validateTask);
-  return parsed.tasks;
+  return parsed.tasks.map(boundCentralTaskFailureMessage);
 }
 
 function parseState(value: unknown): CentralStateRecord {

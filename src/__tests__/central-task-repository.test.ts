@@ -638,6 +638,33 @@ describe('central task CAS repository', () => {
     });
   });
 
+  it('bounds legacy failure text on read before it can reach UI or retry consumers', async () => {
+    const { repository } = await setup();
+    const started = await repository.enqueueAndClaim({ task: 'legacy failure', workflow: 'default', worktree: false });
+    await repository.failStarting({
+      taskId: started.task.taskId,
+      generation: started.task.generation,
+      executionId: started.executionId,
+      ownerToken: started.ownerToken,
+      message: 'original failure',
+    });
+    const ledger = JSON.parse(await readFile(repository.paths.tasksFile, 'utf8')) as {
+      version: number;
+      tasks: Array<{ failure: { message: string } }>;
+    };
+    ledger.tasks[0]!.failure.message = '旧障害'.repeat(MAX_PERSISTED_FAILURE_ERROR_BYTES);
+    const serialized = JSON.stringify(ledger);
+    await writeFile(repository.paths.tasksFile, serialized);
+
+    const tasks = await repository.readTasks();
+    const message = tasks[0]!.failure!.message;
+    expect(Buffer.byteLength(message, 'utf-8')).toBeLessThanOrEqual(MAX_PERSISTED_FAILURE_ERROR_BYTES);
+    expect(Buffer.from(message, 'utf-8').toString('utf-8')).toBe(message);
+    expect(message).toMatch(/\[TRUNCATED: \d+ bytes\]$/);
+    expect((await repository.readTask(started.task.taskId))!.failure!.message).toBe(message);
+    expect(await readFile(repository.paths.tasksFile, 'utf8')).toBe(serialized);
+  });
+
   it('bounds an oversized force-fail message the same way', async () => {
     const { repository } = await setup();
     const started = await repository.enqueueAndClaim({ task: 'huge force fail', workflow: 'default', worktree: false });

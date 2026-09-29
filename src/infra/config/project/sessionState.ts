@@ -245,7 +245,7 @@ function parseSessionState(value: unknown): SessionState {
     ...optionalString(state, 'taskContent'),
     ...optionalString(state, 'lastStep'),
   };
-  return parsed;
+  return boundSessionStateErrorMessage(parsed);
 }
 
 function assertSessionState(state: SessionState): void {
