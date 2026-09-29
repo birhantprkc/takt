@@ -74,7 +74,6 @@ print(json.dumps({
 interface ProbeCommandResult {
   code: number | null;
   stdout: string;
-  stderr: string;
 }
 
 export interface DeepSeekHarnessRuntimeInfo {
@@ -174,17 +173,14 @@ async function runProbeCommand(
   }
 
   let stdout = '';
-  let stderr = '';
   managed.child.stdout?.on('data', (chunk: Buffer | string) => {
     stdout += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
   });
-  managed.child.stderr?.on('data', (chunk: Buffer | string) => {
-    stderr += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  });
+  managed.child.stderr?.resume();
 
   try {
     const { code } = await managed.wait();
-    return { code, stdout, stderr };
+    return { code, stdout };
   } catch (error) {
     await managed.terminate().catch(() => undefined);
     throw error;
@@ -294,12 +290,12 @@ async function probeDeepSeekHarnessRuntime(
 ): Promise<DeepSeekHarnessRuntimeInfo> {
   const result = await runProbeCommand(pythonPath, probeCwd, dshHomeDir, abortSignal, timeoutMs);
   if (result.code !== 0) {
-    if (result.stderr.trim().length === 0 && Number.isInteger(result.code) && result.code !== null) {
+    if (Number.isInteger(result.code) && result.code !== null) {
       throw new DeepSeekHarnessRuntimeValidationError(
         'probe-exit', `managed interpreter probe exited with status ${result.code}`, result.code,
       );
     }
-    throw new Error(`managed interpreter probe failed: ${redactDeepSeekHarnessDiagnostic(result.stderr, process.env)}`);
+    throw new Error('managed interpreter probe failed. Upstream error details are withheld.');
   }
   return parseProbeOutput(result.stdout);
 }

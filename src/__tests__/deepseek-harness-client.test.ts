@@ -380,6 +380,10 @@ class DeepSeekHarness:
                 'code': 'ECONNREFUSED',
                 'message': 'connect ECONNREFUSED deepseek.example:443',
             }
+        if input == 'connection-failure-credential-stderr':
+            print('AUTH: rejected opaque-store-only-secret', file=sys.stderr, flush=True)
+            finish_reason = 'error'
+            failure_error = {'code': 'ECONNREFUSED', 'message': 'connect ECONNREFUSED deepseek.example:443'}
         if input == 'connection-failure-safe-stderr':
             print('connect ECONNRESET peer.example:443', file=sys.stderr, flush=True)
             finish_reason = 'error'
@@ -1066,7 +1070,7 @@ sys.implementation = types.SimpleNamespace(
     }
   });
 
-  it('shows only projected upstream message and safe stderr tail on every failure sink', async () => {
+  it('projects the upstream message and ignores even safe-shaped stderr on every failure sink', async () => {
     const prompt = 'connection-failure-safe-stderr';
     const logger = createProviderEventLogger({
       logsDir: root, sessionId: prompt, runId: 'safe-stderr', enabled: true,
@@ -1089,10 +1093,10 @@ sys.implementation = types.SimpleNamespace(
 
     expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
     expect(response.content).toContain('Upstream message: connect ECONNREFUSED [REDACTED]');
-    expect(response.content).toContain('stderr tail: connect ECONNRESET [REDACTED]');
+    expect(response.content).not.toContain('stderr tail:');
     for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
       expect(surface).toContain('connect ECONNREFUSED [REDACTED]');
-      expect(surface).toContain('connect ECONNRESET [REDACTED]');
+      expect(surface).not.toContain('ECONNRESET');
       expect(surface).not.toContain('deepseek.example');
       expect(surface).not.toContain('peer.example');
     }
@@ -1123,7 +1127,7 @@ sys.implementation = types.SimpleNamespace(
     expect(response.content).not.toContain('token=store-only-secret');
   });
 
-  it('projects unknown provider failures with token, header, env and stderr masking on every sink', async () => {
+  it('projects provider failures with token, header and env masking while discarding stderr on every sink', async () => {
     const prompt = 'provider-request-masked-fields';
     const logger = createProviderEventLogger({ logsDir: root, sessionId: prompt, runId: prompt, enabled: true });
     const events: unknown[] = [];
@@ -1144,7 +1148,7 @@ sys.implementation = types.SimpleNamespace(
 
     expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
     expect(response.content).toContain('Upstream message: provider request failed: timeout');
-    expect(response.content).toContain('stderr tail: transport request failed: connection refused; credential=[REDACTED]');
+    expect(response.content).not.toContain('stderr tail:');
     for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
       expect(surface).toContain('auth=[REDACTED]');
       expect(surface).toContain('token=[REDACTED]');
@@ -1219,10 +1223,11 @@ sys.implementation = types.SimpleNamespace(
   });
 
   it.each([
+    ['connection-failure-credential-stderr', undefined, 'opaque-store-only-secret'],
     ['provider-failure-with-stderr', undefined, 'unknown-provider-stderr'],
     ['provider-failure-late-stderr', undefined, 'unknown-provider-late-stderr'],
     ['transport-failure-with-stderr', 'known-route/transport-unsafe-stderr', 'unknown-transport-stderr'],
-  ] as const)('fails closed when a safe failure is accompanied by unknown stderr: %s', async (prompt, model, rawStderr) => {
+  ] as const)('keeps a safe failure actionable while discarding unknown stderr: %s', async (prompt, model, rawStderr) => {
     const logsDir = path.join(root, `${prompt}-logs`);
     await mkdir(logsDir);
     const logger = createProviderEventLogger({
@@ -1266,15 +1271,16 @@ sys.implementation = types.SimpleNamespace(
     }], [], 'full');
 
     expect(response).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
-    expect(response.content).toContain('Upstream error details are withheld');
+    expect(response.content).toContain(model === undefined
+      ? 'Upstream message: connect ECONNREFUSED [REDACTED]'
+      : 'Upstream message: SDK rejected unknown model [REDACTED]');
     for (const surface of [JSON.stringify(events), persisted, report!]) {
       expect(surface).toContain(response.content);
       expect(surface).not.toContain(rawStderr);
-      expect(surface).not.toContain('connect ECONNREFUSED');
     }
   });
 
-  it('fails closed when a pre-existing worker emits stderr during a later turn', async () => {
+  it('ignores stderr from a pre-existing worker during a later turn', async () => {
     const sessionId = 'stale-turn-stderr-session';
     const logsDir = path.join(root, 'stale-turn-stderr-logs');
     await mkdir(logsDir);
@@ -1327,11 +1333,10 @@ sys.implementation = types.SimpleNamespace(
 
     expect(first).toMatchObject({ status: 'done', sessionId });
     expect(second).toMatchObject({ status: 'error', sessionId, failureCategory: 'provider_error' });
-    expect(second.content).toContain('Upstream error details are withheld');
+    expect(second.content).toContain('Upstream message: connect ECONNREFUSED [REDACTED]');
     for (const surface of [JSON.stringify(second), JSON.stringify(events), persisted, report!]) {
       expect(surface).toContain(second.content);
       expect(surface).not.toContain('stale-turn-worker-stderr');
-      expect(surface).not.toContain('connect ECONNREFUSED');
     }
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim()
@@ -1339,7 +1344,7 @@ sys.implementation = types.SimpleNamespace(
       .toHaveLength(1);
   });
 
-  it('rejects safe-shaped stderr from a previously silent, unowned SDK worker', async () => {
+  it('ignores safe-shaped stderr from a previously silent SDK worker', async () => {
     const options = {
       cwd: root, model: 'stale-turn-stderr', sessionId: 'silent-worker-session',
       providerOptions: { requestTimeoutMs: 10_000 },
@@ -1363,14 +1368,14 @@ sys.implementation = types.SimpleNamespace(
     expect(first).toMatchObject({ status: 'done', sessionId: options.sessionId });
     expect(second).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
     for (const surface of [JSON.stringify(second), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
-      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).toContain('Upstream message: connect ECONNREFUSED [REDACTED]');
       expect(surface).not.toContain('ECONNRESET');
     }
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim().split('\n')).toHaveLength(1);
   });
 
-  it('replaces a bridge after an unowned worker emits safe-shaped stderr', async () => {
+  it('reuses a bridge after a worker emits safe-shaped stderr', async () => {
     const options = {
       cwd: root,
       model: 'stale-turn-stderr',
@@ -1387,14 +1392,14 @@ sys.implementation = types.SimpleNamespace(
     expect(first).toMatchObject({ status: 'done', sessionId: options.sessionId });
     expect(second).toMatchObject({ status: 'error', failureCategory: 'provider_error' });
     for (const surface of [JSON.stringify(second), JSON.stringify(events)]) {
-      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).toContain('Upstream message: connect ECONNREFUSED [REDACTED]');
       expect(surface).not.toContain('stderr tail:');
       expect(surface).not.toContain('ECONNRESET');
     }
     expect((await readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .trim()
       .split('\n'))
-      .toHaveLength(2);
+      .toHaveLength(1);
   });
 
   it('keeps the same worker actionable on a later turn without stderr', async () => {
@@ -1417,7 +1422,7 @@ sys.implementation = types.SimpleNamespace(
       .toHaveLength(1);
   });
 
-  it('fails closed for a model-looking message with an unrecognized credential assignment', async () => {
+  it('projects a model failure with a recognized credential assignment while discarding stderr', async () => {
     const logsDir = path.join(root, 'secret-bearing-model-logs');
     await mkdir(logsDir);
     const logger = createProviderEventLogger({
@@ -1462,11 +1467,13 @@ sys.implementation = types.SimpleNamespace(
     const surfaces = [JSON.stringify(response), JSON.stringify(events), persisted, report!];
 
     expect(response.status).toBe('error');
-    expect(response.content).toContain('Upstream error details are withheld');
+    expect(response.content).toContain('Upstream message: SDK rejected unknown model [REDACTED]; credential=[REDACTED]');
     for (const surface of surfaces) {
       expect(surface).not.toContain('store-only-secret');
       expect(surface).not.toContain('stderr-only-store-secret');
-      expect(surface).not.toContain('SDK rejected unknown model');
+      expect(surface).toContain('SDK rejected unknown model [REDACTED]; credential=[REDACTED]');
+      expect(surface).not.toContain('unknown-model');
+      expect(surface).not.toContain('stderr tail:');
     }
   });
 
@@ -1527,7 +1534,7 @@ sys.implementation = types.SimpleNamespace(
     }
   });
 
-  it('withholds an SDK probe failure even when its traceback contains a store-only value', async () => {
+  it('reports a probe exit without using stderr containing a store-only value', async () => {
     await writeFile(path.join(root, 'fail-probe-store-secret'), '1');
     const logger = createProviderEventLogger({ logsDir: root, sessionId: 'probe-secret', runId: 'probe-secret', enabled: true });
     const events: unknown[] = [];
@@ -1549,7 +1556,7 @@ sys.implementation = types.SimpleNamespace(
     expect(response.content).toMatch(/managed.*install/iu);
     for (const surface of [JSON.stringify(response), JSON.stringify(events), await readFile(logger.filepath, 'utf8'), report]) {
       expect(surface).not.toContain('probe-store-only-secret');
-      expect(surface).toContain('Upstream error details are withheld');
+      expect(surface).toMatch(/probe exited with status [0-9]+/u);
     }
   });
 
@@ -2479,7 +2486,7 @@ sys.implementation = types.SimpleNamespace(
 
     expect(response.status).toBe('error');
     expect(response.failureCategory).toBe('part_timeout');
-    expect(response.content).toContain('timed out');
+    expect(response.content).toMatch(/timed out after 100ms/u);
     expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
@@ -2530,7 +2537,7 @@ sys.implementation = types.SimpleNamespace(
 
     expect(response.status).toBe('error');
     expect(response.failureCategory).toBe('part_timeout');
-    expect(response.content).toContain('timed out');
+    expect(response.content).toMatch(/timed out after 100ms/u);
     expect(Date.now() - startedAt).toBeLessThan(5_000);
     await expect(readFile(path.join(root, 'bridge-start-configs.jsonl'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' });

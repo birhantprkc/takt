@@ -1394,7 +1394,7 @@ describe.skipIf(!fakePythonAvailable)('DeepSeek Harness managed installer', () =
     ['SDK version mismatch', { sdkVersion: '999.0.0' }, /SDK|version/i],
     ['runtime version mismatch', { runtimeVersion: '999.0.0' }, /runtime|version/i],
     ['SDK Requires-Python mismatch', { requiresPython: '>=3.13,<3.14' }, /Requires-Python|Python|compatible/i],
-    ['constructor incompatibility', { constructorCompatible: false }, /constructor|signature|compatible/i],
+    ['constructor incompatibility', { constructorCompatible: false }, /probe exited with status 1/i],
     ['non-CPython implementation', { implementation: 'pypy' }, /CPython|Python|implementation/i],
   ] as const)('rejects %s during the post-sync probe', async (_name, runtimeOptions, message) => {
     const fixture = await prepareInstallFixture(runtimeOptions);
@@ -1953,7 +1953,7 @@ describe.skipIf(!fakePythonAvailable)('DeepSeek Harness managed provider startup
     ['runtime version mismatch', { runtimeVersion: '999.0.0' }, /managed DeepSeek Harness runtime version .* does not match/iu],
     ['SDK Requires-Python mismatch', { requiresPython: '>=3.13,<3.14' }, /SDK Requires-Python .* does not allow CPython 3\.12/iu],
     ['Python version mismatch', { pythonVersion: '3.13.0' }, /managed interpreter must be CPython 3\.12.*found/iu],
-    ['constructor incompatibility', { constructorCompatible: false }, /managed SDK validation failed.*Upstream error details are withheld/iu],
+    ['constructor incompatibility', { constructorCompatible: false }, /probe exited with status 1/iu],
     ['broken interpreter', undefined, /managed interpreter probe exited with status 17/iu],
   ] as const)('returns a safe startup error for %s without starting the bridge', async (name, runtimeOptions, message) => {
     const fixture = await prepareProviderFixture(runtimeOptions ?? {});

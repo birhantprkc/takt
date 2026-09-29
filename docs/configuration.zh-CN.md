@@ -919,7 +919,7 @@ install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，�
 - credential binding 由 source home、参照名和 endpoint 组成。session 存续期间改变其中任一项时，该 turn 会明确失败并提示启动新的 run，而不是静默重置会话。
 - store 更新和删除交给官方 runtime watcher；TAKT 不添加独立 watcher 或 credential cache。更新会在同一 session 的后续 turn 生效。删除的检测存在短暂延迟，runtime 可能用上次有效值再完成一个 turn；报告 credential 缺失的 turn 不会发送 HTTP 请求。
 - **注意：** 运行期间把 store 改成不合法 YAML 并不等于撤销 credential。固定版 `0.1.5rc1` 的已有 session 会继续使用上次有效值，修复文件后才在后续 turn 加载新值；启动时遇到不合法 YAML 则失败。已经发送的请求保留开始时的 Authorization，更新只影响 watcher reload 后的请求。不要把文件损坏或某个 turn 成功视为撤销或 reload 完成的证据，也不要假设写入后的下一 turn 会同步读取新值。
-- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved。结构化失败可区分 model reference 错误、连接失败和 runtime 内部失败。已识别的一般 provider/transport 失败短语也可显示经过投影的上游 message 和 stderr tail，但必须整体符合封闭的安全单行格式。model ID 和主机名替换为 `[REDACTED]`；已识别的类 token 值、Authorization header 和敏感赋值（包括以 `_KEY`、`_TOKEN`、`_SECRET` 或 `_PASSWORD` 结尾的大写环境变量名）替换为固定占位符。已识别的 SDK JSON-RPC、transport-closed 和 timeout 异常只按异常类型显示固定原因，不复制 message、profile、cause 或 stderr。未识别的字段、任意文本、缺失或含糊的 message、延迟或无法归属的 stderr 均回退到固定 runtime-failure 诊断。这是范围有限的投影，无法保证任意自由文本中未知的 store-only secret 可安全显示。已验证路径和上游契约见下方的固定版 SDK 失败边界。settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
+- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved。结构化失败可区分 model reference 错误、连接失败和 runtime 内部失败。已识别的一般 provider/transport 失败短语也可显示经过投影的上游 message，但必须整体符合封闭的安全单行格式。model ID 和主机名替换为 `[REDACTED]`；已识别的类 token 值、Authorization header 和敏感赋值（包括以 `_KEY`、`_TOKEN`、`_SECRET` 或 `_PASSWORD` 结尾的大写环境变量名）替换为固定占位符。已识别的 SDK JSON-RPC、transport-closed 和 timeout 异常只按异常类型显示固定原因，不复制 message、profile、cause 或 stderr。stderr 不用于收集、显示或分类。未识别的字段、任意文本、缺失或含糊的 message 均回退到固定 runtime-failure 诊断。这是范围有限的投影，无法保证任意自由文本中未知的 store-only secret 可安全显示。已验证路径和上游契约见下方的固定版 SDK 失败边界。settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
 - TAKT 不扫描 `.env` 文件。credential 来自 store、所选参照对应的环境变量或官方 runtime 自身的解析路径。
 
 ##### 固定版 SDK 失败边界（`0.1.5rc1`）
@@ -931,16 +931,16 @@ SDK 核查位置包括 `client.py` 的 `_handle_message`／`initialize`（JSON-R
 | --- | --- | --- |
 | SDK `JsonRpcError`（`jsonrpc-error`） | 固定的 JSON-RPC 原因；保留已有的 credential 分类诊断 | runtime 提供的 message/data 及内嵌 stderr；数字 JSON-RPC code 还不是可信的原因分类。 |
 | SDK `TransportClosedError`（`transport-closed`） | 固定的连接关闭原因 | 异常内的退出文本和多行 stderr tail。 |
-| SDK 请求或初始化超时（`timeout`） | 固定的 `part_timeout` 原因 | profile、异常文本及内嵌 stderr；TAKT 自身的请求超时也使用固定诊断。 |
+| SDK 请求或初始化超时（`timeout`） | 固定的 `part_timeout` 原因 | profile、异常文本及内嵌 stderr；TAKT 自身的 timer 保留包含耗时的本地诊断。 |
 | SDK 协议错误（`malformed-response`） | 固定的 `provider_stream_parse_error` 原因 | 原始协议数据。 |
 | 缺少内置 runtime（`runtime-unavailable`） | 固定的 managed environment 修复指引 | SDK 异常文本和路径。 |
-| bridge 启动前的 managed SDK 探测与验证 | 本地核实的版本、Requires-Python 不匹配或 stderr 为空时非零退出，使用固定的具体原因；其他情况使用通用修复指引 | 探测的 traceback 和 stderr 可能含任意值。 |
+| bridge 启动前的 managed SDK 探测与验证 | 本地核实的版本、Requires-Python 不匹配或 非零退出，使用固定的具体原因；其他情况使用通用修复指引 | 探测的 traceback 和 stderr 可能含任意值。 |
 | 其他 SDK/runtime 异常及 provider HTTP 文本（`runtime-error`、`turn/end`） | 仅投影整体符合已审查单行格式的内容，否则使用 `Upstream error details are withheld.` | 任意文本可能含有 TAKT 不知道的 store-only secret。 |
-| bridge worker / runtime 的 stderr | 仅投影可归属到请求、已完整观察且符合已审查单行格式的内容 | 未知、迟到、无归属、超长的 stderr 保持隐藏；异常内的 stderr 也不可信。 |
+| bridge worker / runtime 的 stderr | 不用于收集、显示或分类 | 即使看似安全也丢弃，且不影响 session 复用；异常内的 stderr 也不可信。 |
 
 只检查了固定版 `0.1.5rc1` Python SDK 的上述路径。原生 runtime 失败、provider HTTP body、通知、二进制文件特有的退出文本和未来版本**未被完整验证**。离线测试将不同的 dummy store-only 值放入 JSON-RPC message/data、异常与 cause、timeout profile、探测 traceback 和 stderr，检查 response、onStream、provider event log 和 trace report。测试通过并不能证明任意自由文本或未知编码安全；未知格式仍回退到固定诊断。
 
-若要安全地显示更多细节，官方 SDK/runtime 必须提供**带版本且有限枚举的原因 code**，并在可以读取 credential store 的一侧生成已去除 secret 和敏感 HTTP header/body 的显示字段。未经验证的 `safe` 标志、model、host、path、profile、cause chain 和 stderr 片段均不可信。stderr 还需证明其请求归属及有界的观测完成，否则不得显示。TAKT 应固定并校验该 schema，针对未知 code 和四个输出面中的 dummy store-only 值运行非泄露测试后才接入。该上游依赖由 [#1621](https://github.com/nrslib/takt/issues/1621) 跟踪；官方 SDK/runtime 更新不属于 #1605 或 PR #1619。测试不需要真实 credential 或用户错误日志。
+若要安全地显示更多细节，官方 SDK/runtime 必须提供**带版本且有限枚举的原因 code**，并在可以读取 credential store 的一侧生成已去除 secret 和敏感 HTTP header/body 的显示字段。未经验证的 `safe` 标志、model、host、path、profile、cause chain 和 stderr 片段均不可信。当前的封闭 allowlist 是临时措施，核实上游契约后将替换；stderr 不在范围内。TAKT 应固定并校验该 schema，针对未知 code 和四个输出面中的 dummy store-only 值运行非泄露测试后才接入。该上游依赖由 [#1621](https://github.com/nrslib/takt/issues/1621) 跟踪；官方 SDK/runtime 更新不属于 #1605 或 PR #1619。测试不需要真实 credential 或用户错误日志。
 
 DeepSeek Harness provider 目前处于 developer preview 阶段。只有在明确接受会消耗 DeepSeek API quota 的情况下，才应运行下面的 live smoke。
 

@@ -89,6 +89,8 @@ const CLASSIFICATION_DETAILS: Record<
 
 const SAFE_MODEL_REFERENCE_FAILURE = /^SDK rejected unknown model "[A-Za-z0-9][A-Za-z0-9._:/-]*"$/u;
 const SAFE_CONNECTION_FAILURE = /^connect (ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) [A-Za-z0-9.-]+(?::[0-9]{1,5})?$/u;
+// Temporary closed allowlist until the upstream SDK provides a verified, versioned
+// safe-diagnostic contract (tracked in #1621). Replace it when that contract is available.
 const PROJECTABLE_RUNTIME_MESSAGE = /^(SDK rejected unknown model "[A-Za-z0-9][A-Za-z0-9._:/-]*"|connect (?:ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND) [A-Za-z0-9.-]+(?::[0-9]{1,5})?|DeepSeek Harness (?:runtime|SDK) internal failure|provider request failed: timeout|transport request failed: connection refused)([ ;].*)?$/u;
 const SENSITIVE_FIELD = /^([A-Za-z_][A-Za-z0-9_.-]{0,127})\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s;,"']+)$/iu;
 const SENSITIVE_ENV_NAME = /^[A-Z][A-Z0-9_]{0,123}_(?:KEY|TOKEN|SECRET|PASSWORD)$/u;
@@ -190,11 +192,9 @@ export function classifyDeepSeekRuntimeFailure(
 export function buildDeepSeekRuntimeFailureDiagnostic(
   classification: Exclude<DeepSeekRuntimeFailureClassification, 'unknown'>,
   upstreamMessage?: string,
-  stderrTail?: string,
 ): string {
   return RUNTIME_FAILURE_DETAILS[classification]
-    + (upstreamMessage === undefined ? '' : ` Upstream message: ${upstreamMessage}`)
-    + (stderrTail === undefined ? '' : `\nstderr tail: ${stderrTail}`);
+    + (upstreamMessage === undefined ? '' : ` Upstream message: ${upstreamMessage}`);
 }
 
 /** SDK exception type is mapped to a bridge-owned code; its message and cause remain untrusted. */
@@ -243,11 +243,6 @@ function projectSensitiveFields(suffix: string | undefined): string | undefined 
     }
   }
   return `; ${projected.join('; ')}`;
-}
-
-/** A stderr tail may be shown only when its complete, single-line shape is known. */
-export function projectDeepSeekRuntimeStderr(stderr: string): string | undefined {
-  return projectDeepSeekRuntimeMessage(stderr);
 }
 
 /** Carry a safe classification from the resolution boundary to the failure formatter. */

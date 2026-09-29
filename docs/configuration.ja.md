@@ -1208,7 +1208,7 @@ install の `--python` オプションと provider の `python_path` オプシ�
 - credential binding: source home、参照、endpoint は bridge process の同一性に含まれます。session 存続中にこれらが変わると該当 turn は明示的に失敗し、会話を黙って reset せず、新しい run を案内します。
 - store の更新・削除は公式 runtime の watcher へ委譲し、TAKT は独自 watcher や credential cache を追加しません。更新は同一 session の後続 turn から使われます。削除の反映には短い遅延があり、公式 runtime が last-good の値で 1 turn 完了してから、credential 不足を報告する turn は HTTP 要求を送りません。
 - **注意:** 実行中にstoreを破損させてもcredentialの失効にはなりません。固定版 `0.1.5rc1` では、不正YAMLへの更新後も既存sessionはlast-good値を使い、正常なstoreへ修復すると後続turnで更新を取り込みました。起動時の不正YAMLは失敗します。送信済みrequestはstore更新中も開始時のAuthorizationを維持し、更新はwatcherのreload後のrequestから適用されます。破損ファイルやturn成功を失効・reload完了の証拠とせず、書換直後の次turnへ同期反映されるとも扱わないでください。
-- 診断は raw HTTP body や絶対 credential path を省き、論理的な探索元（`DSH_HOME` または既定 harness home）と修復手順を示します。構造化された失敗ではmodel参照の誤り、接続失敗、runtime内部失敗を区別します。既知の一般的なprovider/transport失敗文言も、上流messageとstderr tail全体が安全な1行形式に一致すれば、投影した文言を診断に反映します。model IDとhostは`[REDACTED]`へ置換。認識できるtoken様値、Authorization header、機密代入（`_KEY`、`_TOKEN`、`_SECRET`、`_PASSWORD`で終わる大文字環境変数名を含む）は固定の伏せ字に置換します。SDK由来のJSON-RPC・transport-closed・timeoutは例外の種類だけで原因別診断を出し、本文・profile・cause・stderrは転記しません。認識できないフィールド、自由文、欠落・曖昧なmessage、遅延・帰属不明stderrは固定のruntime-failure診断へ戻します。これは範囲を限定した投影であり、任意の自由文にある未知のstore-only secretを安全に表示できると保証する方式ではありません。確認済み経路と上流に必要な契約は以下の固定SDKの失敗境界を参照してください。settingsの読取不可、容量超過、不正YAML、参照名不正、保存endpointの型不正を区別します。ただし公式runtime側の既知の問題として、固定版`0.1.5rc1`ではcredentialが通知や保存sessionに残ることがあり、TAKT側のredactionでは除去できません。再現検証はdummy credentialとローカルmockだけを使い、実キーを反射させないでください。
+- 診断は raw HTTP body や絶対 credential path を省き、論理的な探索元（`DSH_HOME` または既定 harness home）と修復手順を示します。構造化された失敗ではmodel参照の誤り、接続失敗、runtime内部失敗を区別します。既知の一般的なprovider/transport失敗文言も、上流message全体が許可済みの1行形式に一致すれば、投影した文言を診断に反映します。model IDとhostは`[REDACTED]`へ置換。認識できるtoken様値、Authorization header、機密代入（`_KEY`、`_TOKEN`、`_SECRET`、`_PASSWORD`で終わる大文字環境変数名を含む）は固定の伏せ字に置換します。SDK由来のJSON-RPC・transport-closed・timeoutは例外の種類だけで原因別診断を出し、本文・profile・cause・stderrは転記しません。stderrは収集・表示・分類に使用しません。認識できないフィールド、自由文、欠落・曖昧なmessageは固定のruntime-failure診断へ戻します。これは範囲を限定した投影であり、任意の自由文にある未知のstore-only secretを安全に表示できると保証する方式ではありません。確認済み経路と上流に必要な契約は以下の固定SDKの失敗境界を参照してください。settingsの読取不可、容量超過、不正YAML、参照名不正、保存endpointの型不正を区別します。ただし公式runtime側の既知の問題として、固定版`0.1.5rc1`ではcredentialが通知や保存sessionに残ることがあり、TAKT側のredactionでは除去できません。再現検証はdummy credentialとローカルmockだけを使い、実キーを反射させないでください。
 - TAKT は `.env` を走査しません。credential は store、選択された参照の環境変数、または公式 runtime 自身の解決経路から得られます。
 
 ##### 固定SDKの失敗境界（`0.1.5rc1`）
@@ -1220,16 +1220,16 @@ SDK側の確認箇所は `client.py` の `_handle_message`／`initialize`（JSON
 | --- | --- | --- |
 | SDK `JsonRpcError`（`jsonrpc-error`） | 原因別の固定文言。分類済みcredentialエラーは従来の診断を維持 | runtime由来のmessage/dataと内包stderr。数値JSON-RPC codeは安全な原因分類ではない。 |
 | SDK `TransportClosedError`（`transport-closed`） | 接続終了を示す固定文言 | 例外本文の終了情報や複数行のstderr tail。 |
-| SDK要求・初期化のtimeout（`timeout`） | 固定の `part_timeout` 診断 | profile、例外本文、内包stderr。TAKT自身のtimeoutも固定文言。 |
+| SDK要求・初期化のtimeout（`timeout`） | 固定の `part_timeout` 診断 | profile、例外本文、内包stderr。TAKT自身のtimerは自前の経過時間付き文言を維持。 |
 | SDK protocol error（`malformed-response`） | 固定の `provider_stream_parse_error` 診断 | 生のprotocol内容。 |
 | 同梱runtimeの欠落（`runtime-unavailable`） | managed environmentの修復案内 | SDKの例外本文やpath。 |
-| bridge起動前のmanaged SDK probe・検証 | ローカルで確定した版・Requires-Python不一致、stderrが空の非ゼロ終了のみ原因別固定文言。それ以外は一般的な修復案内 | 任意の値を含み得るprobeのtracebackとstderr。 |
+| bridge起動前のmanaged SDK probe・検証 | ローカルで確定した版・Requires-Python不一致、非ゼロ終了原因別固定文言。それ以外は一般的な修復案内 | 任意の値を含み得るprobeのtracebackとstderr。 |
 | その他のSDK/runtimeエラーとproviderのHTTP本文（`runtime-error`、`turn/end`） | 全体が検証済みの1行形式に一致する場合だけ投影。それ以外は `Upstream error details are withheld.` | 自由文にはTAKTの知らないstore内のsecretが入り得る。 |
-| bridge worker・runtimeのstderr | requestに帰属し、観測完了した検証済みの1行形式だけ投影 | 未知・遅延・帰属不明・長すぎるstderrは非表示。SDK例外内のstderrも信用しない。 |
+| bridge worker・runtimeのstderr | 収集・表示・分類に使用しない | 安全な形式に見える場合も破棄し、session再利用の判断にも使用しない。SDK例外内のstderrも信用しない。 |
 
 検証したのは固定版Python SDKの上記経路だけです。native runtimeの失敗、providerのHTTP本文、通知、実行ファイル固有の終了文言、将来版は網羅していません。オフラインテストではstoreにだけあるダミー値をJSON-RPC message/data、例外・cause、timeout profile、probe traceback、stderrに入れ、応答・onStream・provider event log・trace reportを検査します。テスト成功は任意の自由文や未知の符号化が安全である証明にはならず、未確認の形式は固定診断へ戻します。
 
-表示範囲を広げるには、公式SDK/runtimeが**版付きの有限な原因code**と、credential storeにアクセスできる側でsecret・機密HTTP header/bodyを除去した表示用フィールドを提供する必要があります。検証されていない `safe` フラグ、model・host・path・profile、cause chain、stderr断片は信用しません。stderrにはrequestへの帰属と観測完了の保証が必要です。できなければ表示対象から外します。TAKTは契約の版を固定・検証し、未知のcodeやダミーstore-only値が4つの出力面へ漏れないことをテストしてから導入します。上流依存は [#1621](https://github.com/nrslib/takt/issues/1621) で追跡し、公式SDK/runtimeの更新は #1605 と PR #1619 の対象外です。実キーや利用者ログは検証に使いません。
+表示範囲を広げるには、公式SDK/runtimeが**版付きの有限な原因code**と、credential storeにアクセスできる側でsecret・機密HTTP header/bodyを除去した表示用フィールドを提供する必要があります。検証されていない `safe` フラグ、model・host・path・profile、cause chain、stderr断片は信用しません。現在の閉じたallowlistは暫定で、この上流契約を確認した後に置換します。stderrは対象外です。TAKTは契約の版を固定・検証し、未知のcodeやダミーstore-only値が4つの出力面へ漏れないことをテストしてから導入します。上流依存は [#1621](https://github.com/nrslib/takt/issues/1621) で追跡し、公式SDK/runtimeの更新は #1605 と PR #1619 の対象外です。実キーや利用者ログは検証に使いません。
 
 この provider は developer preview の互換性境界です。DeepSeek API quota を意図的に消費するときだけ live smoke を実行してください。通常の unit、integration、mock E2E suite は DeepSeek を呼び出しません。
 
