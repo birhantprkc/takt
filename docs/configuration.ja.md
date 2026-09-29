@@ -513,7 +513,7 @@ kiro_api_key: ...              # Kiro CLI 用
 - 環境変数の使用を検討してください。
 - 必要に応じて `~/.takt/config.yaml` をグローバル `.gitignore` に追加してください。
 - Cursor provider は `cursor-agent login` が済んでいれば API キーなしでも動作できます。
-- 認証情報を設定すれば、対応する CLI ツール（Claude Code、Codex、OpenCode、Pi）のインストールは不要です。TAKT が対応する API を直接呼び出します。DeepSeek Harness は `takt deepseek-harness install` で用意する uv-managed environment と、glibc `>= 2.28` の Linux x64/arm64 または macOS arm64 `>= 14.0` が必要です。Windows、macOS x64、Linux musl、古い Linux glibc、古い macOS は未対応で、system Python は不要です。
+- 認証情報を設定すれば、対応する CLI ツール（Claude SDK、Codex、Pi）のインストールは不要です。TAKT が対応する API を直接呼び出します。DeepSeek Harness は `takt deepseek-harness install` で用意する uv-managed environment と、glibc `>= 2.28` の Linux x64/arm64 または macOS arm64 `>= 14.0` が必要です。Windows、macOS x64、Linux musl、古い Linux glibc、古い macOS は未対応で、system Python は不要です。
 - DeepSeek API key は Python bridge の環境変数にだけ渡し、command argument や workflow 生成 config には渡しません。
 - Copilot provider は `copilot` CLI のインストールが必要です。GitHub トークンは認証に使用されます。
 - Kiro provider は `kiro-cli` CLI のインストールが必要です。`TAKT_KIRO_API_KEY` / `kiro_api_key` は子プロセスの `KIRO_API_KEY` として渡されます。どちらも未設定の場合は公式の `KIRO_API_KEY` 環境変数を使用します。
@@ -578,6 +578,27 @@ workflow の `promotion` entry は `runtime.yaml` で選択された target ladd
 provider: claude
 model: opus     # すべての step のデフォルトモデル（上書きされない限り）
 ```
+
+### OpenCode v1/v2 の選択
+
+OpenCode provider は外部 `opencode` CLI の `serve` を起動し、SDK で専用サーバーへ接続します。API キーだけでは実行できません。既定は v1 CLI と `@opencode-ai/sdk` 1.18.28 です。v2 は `@opencode/client` 2.0.18 を使います。CLI v1 1.18.2 と v2 2.0.18 で検証しています。選択した世代と CLI の major version が一致しない場合、サーバー起動前にエラーにします。OpenCode v2 は同名の `opencode` を置き換えるため、自動判定や自動更新は行いません。
+
+```sh
+# 既存 CLI を更新せず v2 を隔離して導入
+npm install --prefix /path/to/opencode-v2 @opencode/cli@2.0.18
+TAKT_OPENCODE_VERSION=v2 TAKT_OPENCODE_PATH=/path/to/opencode-v2/node_modules/.bin/opencode takt run
+# v1 に戻す場合も、対応するバイナリを明示
+TAKT_OPENCODE_VERSION=v1 TAKT_OPENCODE_PATH=/path/to/opencode-v1 takt run
+```
+
+この 2 変数は TAKT プロセス全体の実行環境を選びます。step ごとの `provider_options` ではありません。CI やランチャーにも同じ値を保存してください。未指定の path は `PATH` の `opencode` です。session ID は世代をまたいで移行しません。切替後は新しい実行を開始してください。
+
+v2 ではフェーズごとに session の system 指示と権限を更新し、同梱 plugin が tool allowlist を適用します。plugin が有効でなければプロンプトを送信しません。`bash` は `shell`、`task` は `subagent`、`apply_patch` は `patch` へ変換します。v2 は `read` でディレクトリを列挙するため v1 の `list` shim は使いません。MCP は従来の設定を v2 形式へ変換し、許可した tool を直接公開します。構造化出力は schema をプロンプトへ含める既存の formatless 経路で抽出・検証します。v2 の native JSON Schema API による生成保証ではありません。
+
+開発時は build 後に `npm run test:opencode-v2-probe -- --cli /absolute/path/to/opencode-v2` で、隔離された実 CLI と mock LLM/MCP による受入検証を実行できます。認証情報やユーザーの OpenCode 設定は使用しません。通常の v1 回帰 probe は `npm run test:opencode-probe` です。
+
+v2 probe は system 指示、同一 session のフェーズ間 read/write 権限切替、禁止された write の拒否、schema 出力、質問、停止と再開、compact、サーバー再起動後の再開、並列 session の分離、stdio MCP tool の実行を検証します。macOS・Node.js 26・CLI 2.0.18 で実行契約を確認しています。実サービスのモデル応答と remote MCP OAuth は未検証で、OAuth 設定変換は unit test で確認しています。MCP discovery は許可した tool ID の登録を最大 30 秒待ちます。tool 制限がない場合は各 assigned server に少なくとも 1 tool の登録が必要です。resource だけを公開する server はこの経路で使える tool を持ちません。v2 は v1 の `todowrite` tool を公開しません。
+
 
 ## Runtime Provider 設定（runtime.yaml）
 
