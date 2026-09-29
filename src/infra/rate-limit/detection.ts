@@ -20,60 +20,43 @@ const RATE_LIMIT_STREAM_MARKER_PATTERNS = [
   /usage_limit_exceeded/i,
 ] as const;
 
-// Codex returns its usage-limit notice as a normal, successful response body
-// rather than an error, so we can't match "usage limit" anywhere in the text
-// like the patterns above (that misclassified ordinary answers merely
-// mentioning "usage limit ... try again later" elsewhere in the sentence).
-// CodexClient joins multiple agent_message items with "\n", so the notice
-// can also land as the final line of a longer reply (e.g. "Sure, let me
-// check that.\nYou've hit your usage limit. Try again later."). We evaluate
-// only the last non-empty line, and require it to fully match one of the
-// closed set of templates produced by UsageLimitReachedError::fmt
-// (codex-rs/protocol/src/error.rs). Each pattern below mirrors one branch of
-// that fmt impl, in source order; only the genuinely variable parts
-// ({limit_name}, {promo_message}, the retry_suffix time) are wildcards —
-// everything else, including the URLs, is matched literally.
-// The retry_suffix time itself is not free-form: format_retry_timestamp
-// (codex-rs/protocol/src/error.rs) only ever emits "%-I:%M %p" (e.g.
-// "3:45 PM") or, when the reset date differs from today,
-// "%b %-d{suffix}, %Y %-I:%M %p" (e.g. "Jan 5th, 2026 3:45 PM").
+// Match the complete final agent_message item against known Codex notices.
+// Arbitrary promo_message text is excluded because it can also be an ordinary reply.
+// Templates follow UsageLimitReachedError::fmt in codex-rs/protocol/src/error.rs.
 const RETRY_TIMESTAMP =
   '(?:[A-Za-z]{3} \\d{1,2}(?:st|nd|rd|th), \\d{4} \\d{1,2}:\\d{2} (?:AM|PM)|\\d{1,2}:\\d{2} (?:AM|PM))';
-const RETRY_SUFFIX_AFTER_OR = new RegExp(` or try again(?: later| at ${RETRY_TIMESTAMP})\\.$`, 'i');
-const RETRY_SUFFIX = new RegExp(` try again(?: later| at ${RETRY_TIMESTAMP})\\.$`, 'i');
+const RETRY_SUFFIX = `try again(?: later| at ${RETRY_TIMESTAMP})`;
 
 const RATE_LIMIT_NOTICE_PATTERNS = [
   // limit_name branch (non-codex/gpt-reserve model). limit_name can itself
   // contain a period (e.g. "gpt-5.1-codex"), so it's matched lazily rather
   // than excluding ".".
   new RegExp(
-    `^you['’]ve hit your usage limit for [^\\n]+?\\. switch to another model now,${RETRY_SUFFIX_AFTER_OR.source}`,
+    `^you['’]ve hit your usage limit for [^\\n]+?\\. switch to another model now, or ${RETRY_SUFFIX}\\.?$`,
     'i',
   ),
-  // promo_message branch
-  new RegExp(`^you['’]ve hit your usage limit\\. .+,${RETRY_SUFFIX_AFTER_OR.source}`, 'i'),
   // Plus plan
   new RegExp(
-    `^you['’]ve hit your usage limit\\. upgrade to pro \\(https://chatgpt\\.com/explore/pro\\), visit https://chatgpt\\.com/codex/settings/usage to purchase more credits${RETRY_SUFFIX_AFTER_OR.source}`,
+    `^you['’]ve hit your usage limit\\. upgrade to pro \\(https://chatgpt\\.com/explore/pro\\), visit https://chatgpt\\.com/codex/settings/usage to purchase more credits(?: or ${RETRY_SUFFIX})?\\.?$`,
     'i',
   ),
   // Team / business / enterprise-admin plans
   new RegExp(
-    `^you['’]ve hit your usage limit\\. to get more access now, send a request to your admin${RETRY_SUFFIX_AFTER_OR.source}`,
+    `^you['’]ve hit your usage limit\\. to get more access now, send a request to your admin or ${RETRY_SUFFIX}\\.?$`,
     'i',
   ),
   // Free / Go plans
   new RegExp(
-    `^you['’]ve hit your usage limit\\. upgrade to plus to continue using codex \\(https://chatgpt\\.com/explore/plus\\),${RETRY_SUFFIX_AFTER_OR.source}`,
+    `^you['’]ve hit your usage limit\\. upgrade to plus to continue using codex \\(https://chatgpt\\.com/explore/plus\\), or ${RETRY_SUFFIX}\\.?$`,
     'i',
   ),
   // Pro / ProLite / ProMax plans
   new RegExp(
-    `^you['’]ve hit your usage limit\\. visit https://chatgpt\\.com/codex/settings/usage to purchase more credits${RETRY_SUFFIX_AFTER_OR.source}`,
+    `^you['’]ve hit your usage limit\\. visit https://chatgpt\\.com/codex/settings/usage to purchase more credits(?: or ${RETRY_SUFFIX})?\\.?$`,
     'i',
   ),
   // Enterprise / Edu / Unknown / None plans (retry_suffix, not _after_or)
-  new RegExp(`^you['’]ve hit your usage limit\\.${RETRY_SUFFIX.source}`, 'i'),
+  new RegExp(`^you['’]ve hit your usage limit\\. ${RETRY_SUFFIX}\\.?$`, 'i'),
 ] as const;
 
 // Same source (UsageLimitReachedError::fmt, rate_limit_reached_type branch)
@@ -102,29 +85,16 @@ export function isRateLimitNoticeResponse(text: string | undefined): boolean {
   if (!trimmed) {
     return false;
   }
-  const lines = trimmed.split(/\r?\n/);
-  let lastLine = '';
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const candidate = lines[i]?.trim() ?? '';
-    if (candidate.length > 0) {
-      lastLine = candidate;
-      break;
-    }
-  }
-  if (!lastLine) {
-    return false;
-  }
-  if (RATE_LIMIT_NOTICE_PATTERNS.some((pattern) => pattern.test(lastLine))) {
-    return true;
-  }
-  return RATE_LIMIT_WORKSPACE_NOTICE_PATTERNS.some((pattern) => pattern.test(lastLine));
+  return RATE_LIMIT_NOTICE_PATTERNS.some((pattern) => pattern.test(trimmed))
+    || RATE_LIMIT_WORKSPACE_NOTICE_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
 export function containsRateLimitError(text: string | undefined): boolean {
   if (!text) {
     return false;
   }
-  return RATE_LIMIT_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+  return RATE_LIMIT_ERROR_PATTERNS.some((pattern) => pattern.test(text))
+    || isRateLimitNoticeResponse(text);
 }
 
 export function resolveRateLimitTextSource(text: string | undefined): 'stream_marker' | undefined {
@@ -139,7 +109,8 @@ export function buildRateLimitInfo(
   source: RateLimitInfo['source'],
   text?: string,
 ): RateLimitInfo {
-  const resetAtRaw = text?.match(/resets?\s+([^\n\r]+)/i)?.[1]?.trim();
+  const resetAtRaw = text?.match(/resets?\s+([^\n\r]+)/i)?.[1]?.trim()
+    ?? text?.match(/\btry\s+again\s+at\s+((?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+)?\d{1,2}:\d{2}\s*[ap]m(?:\s*\([^)\r\n]+\))?)/i)?.[1]?.trim();
   return {
     provider,
     detectedAt: new Date(),

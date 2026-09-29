@@ -693,6 +693,25 @@ export class CodexClient {
           return errorResponse;
         }
 
+        if (isRateLimitNoticeResponse(lastAgentMessageText)) {
+          const rateLimitedResponse = this.buildRateLimitedResponse(
+            agentType,
+            currentThreadId,
+            lastAgentMessageText.trim(),
+            options,
+            totalRetryCount(),
+            'error_text',
+          );
+          emitResult(options.onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
+          return {
+            ...rateLimitedResponse,
+            providerUsage: providerUsage ?? {
+              usageMissing: true,
+              reason: USAGE_MISSING_REASONS.NOT_AVAILABLE,
+            },
+          };
+        }
+
         const structuredOutput = parseStructuredOutput(lastAgentMessageText.trim(), !!options.outputSchema);
         // JSON（または fence）で始まる純粋な structured 応答は、拒否文を引用していても拒否ではない。
         // 拒否文で始まる応答は、末尾に JSON が続いていてもこの除外に該当しない。
@@ -731,19 +750,6 @@ export class CodexClient {
             failure.category,
           );
           return errorResponse;
-        }
-
-        if (isRateLimitNoticeResponse(trimmed)) {
-          const rateLimitedResponse = this.buildRateLimitedResponse(
-            agentType,
-            currentThreadId,
-            trimmed,
-            options,
-            totalRetryCount(),
-            'error_text',
-          );
-          emitResult(options.onStream, false, rateLimitedResponse.error ?? rateLimitedResponse.content, currentThreadId);
-          return rateLimitedResponse;
         }
 
         emitResult(options.onStream, true, trimmed, currentThreadId);

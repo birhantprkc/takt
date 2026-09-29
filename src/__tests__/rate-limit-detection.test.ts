@@ -62,6 +62,28 @@ describe('containsRateLimitError', () => {
 
     expect(info.resetAtRaw).toBe('Aug 16 at 1am (Asia/Tokyo)');
   });
+  it.each([
+    '7:04 PM',
+    'Sep 1st, 2026 7:04 PM',
+    'Sep 2nd, 2026 7:04 PM',
+    'Sep 3rd, 2026 7:04 PM',
+    'Sep 11th, 2026 7:04 PM',
+  ])('preserves the Codex retry timestamp %j without converting it', (retryTimestamp) => {
+    const text = `You’ve hit your usage limit. Try again at ${retryTimestamp}.`;
+
+    const info = buildRateLimitInfo('codex', 'error_text', text);
+
+    expect(info.resetAtRaw).toBe(retryTimestamp);
+  });
+
+  it.each([
+    'You’ve hit your usage limit. Try again later.',
+    'You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.',
+  ])('leaves the Codex reset time unknown for %j', (text) => {
+    const info = buildRateLimitInfo('codex', 'error_text', text);
+
+    expect(info.resetAtRaw).toBeUndefined();
+  });
 });
 
 describe('containsRateLimitMarker', () => {
@@ -105,8 +127,6 @@ describe('isRateLimitNoticeResponse', () => {
   it.each([
     // limit_name branch (non-codex/gpt-reserve model)
     "You've hit your usage limit for gpt-5.1-codex. Switch to another model now, or try again later.",
-    // promo_message branch
-    "You've hit your usage limit. 50% off your next month, or try again later.",
     // Plus plan
     'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.',
     // Team / business / enterprise-admin plans
@@ -129,25 +149,21 @@ describe('isRateLimitNoticeResponse', () => {
     // retry_suffix_after_or with the other-day timestamp format
     "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Jan 5th, 2026 3:45 PM.",
     "  You've hit your usage limit. Try again later.  ",
-    // CodexClient joins multiple agent_message items with "\n" (src/infra/codex/client.ts),
-    // so the notice can arrive as the final line of a longer reply.
-    "Sure, let me check that.\nYou've hit your usage limit. Try again later.",
-    "Let me look into your account.\nOne moment please.\nYou've hit your usage limit. Try again at 3:45 PM.",
-    // Trailing blank lines shouldn't hide the notice line.
-    "Sure, let me check that.\nYou've hit your usage limit. Try again later.\n\n",
     // rate_limit_reached_type workspace-credit / spend-cap branches
     // (UsageLimitReachedError::fmt, codex-rs error.rs) — exact full-line strings.
     'Your workspace is out of credits. Add credits to continue.',
     'Your workspace is out of credits. Ask your workspace owner to refill in order to continue.',
     'You hit your spend cap set in your workspace. Increase your spend cap to continue.',
     'You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.',
-    // Workspace variant as the last line of a multi-item joined reply.
-    "Checking your account now.\nYour workspace is out of credits. Add credits to continue.",
   ])('response text %j is detected as a rate limit notice', (text) => {
     expect(isRateLimitNoticeResponse(text)).toBe(true);
   });
 
   it.each([
+    "You've hit your usage limit. Here's how to fix the code, or try again later.",
+    "You've hit your usage limit. 50% off your next month, or try again later.",
+    "The exact error is:\nYou've hit your usage limit. Try again later.",
+    "The exact error is:\nYour workspace is out of credits. Add credits to continue.",
     "> You have hit your usage limit. Let me explain why you saw this error message and how to work around it.",
     "**You've hit your usage limit.** Try again later.",
     'The API returns a 429 when you hit your usage limit for the day. Try again later.',
