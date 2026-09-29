@@ -160,6 +160,69 @@ describe('isRateLimitNoticeResponse', () => {
   });
 
   it.each([
+    '1:00 AM',
+    '12:59 PM',
+    'Jan 31st, 2026 1:00 AM',
+    'Feb 28th, 2026 12:59 PM',
+    'Feb 29th, 2028 3:45 PM',
+    'Feb 29th, 2000 3:45 PM',
+    'Mar 31st, 2026 3:45 PM',
+    'Apr 30th, 2026 3:45 PM',
+    'May 31st, 2026 3:45 PM',
+    'Jun 30th, 2026 3:45 PM',
+    'Jul 31st, 2026 3:45 PM',
+    'Aug 31st, 2026 3:45 PM',
+    'Sep 30th, 2026 3:45 PM',
+    'Oct 31st, 2026 3:45 PM',
+    'Nov 30th, 2026 3:45 PM',
+    'Dec 31st, 2026 3:45 PM',
+    'Sep 1st, 2026 3:45 PM',
+    'Sep 2nd, 2026 3:45 PM',
+    'Sep 3rd, 2026 3:45 PM',
+    'Sep 11th, 2026 3:45 PM',
+    'Sep 12th, 2026 3:45 PM',
+    'Sep 13th, 2026 3:45 PM',
+    'Sep 21st, 2026 3:45 PM',
+    'Sep 22nd, 2026 3:45 PM',
+    'Sep 23rd, 2026 3:45 PM',
+  ])('accepts a valid Codex retry timestamp: %s', (timestamp) => {
+    expect(isRateLimitNoticeResponse(`You've hit your usage limit. Try again at ${timestamp}.`)).toBe(true);
+  });
+
+  it.each([
+    'Xxx 99th, 2026 99:99 AM',
+    'Xxx 1st, 2026 3:45 PM',
+    '0:00 AM',
+    '13:00 PM',
+    '12:60 PM',
+    '01:00 AM',
+    'Sep 0th, 2026 3:45 PM',
+    'Sep 01st, 2026 3:45 PM',
+    'Jan 32nd, 2026 3:45 PM',
+    'Feb 29th, 2026 3:45 PM',
+    'Feb 29th, 2100 3:45 PM',
+    'Feb 30th, 2028 3:45 PM',
+    'Apr 31st, 2026 3:45 PM',
+    'Jun 31st, 2026 3:45 PM',
+    'Sep 31st, 2026 3:45 PM',
+    'Nov 31st, 2026 3:45 PM',
+    'Sep 1th, 2026 3:45 PM',
+    'Sep 2th, 2026 3:45 PM',
+    'Sep 3th, 2026 3:45 PM',
+    'Sep 11st, 2026 3:45 PM',
+    'Sep 12nd, 2026 3:45 PM',
+    'Sep 13rd, 2026 3:45 PM',
+    'Sep 21th, 2026 3:45 PM',
+    'Sep 22th, 2026 3:45 PM',
+    'Sep 23th, 2026 3:45 PM',
+    'Jan 31th, 2026 3:45 PM',
+  ])('rejects an impossible or non-formatter retry timestamp: %s', (timestamp) => {
+    const text = `You've hit your usage limit. Try again at ${timestamp}.`;
+    expect(isRateLimitNoticeResponse(text)).toBe(false);
+    expect(containsRateLimitError(text)).toBe(false);
+  });
+
+  it.each([
     "You've hit your usage limit. Here's how to fix the code, or try again later.",
     "You've hit your usage limit. 50% off your next month, or try again later.",
     "The exact error is:\nYou've hit your usage limit. Try again later.",

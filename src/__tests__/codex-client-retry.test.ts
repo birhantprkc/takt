@@ -226,6 +226,8 @@ describe('CodexClient retry', () => {
     "You've hit your usage limit. Here's how to fix the code, or try again later.",
     "The exact error is:\nYou've hit your usage limit. Try again later.",
     "The exact error is:\nYour workspace is out of credits. Add credits to continue.",
+    "You've hit your usage limit. Try again at Xxx 99th, 2026 99:99 AM.",
+    "You've hit your usage limit. Try again at Sep 1th, 2026 3:45 PM.",
   ])('preserves an ordinary final agent message quoting a usage limit: %j', async (text) => {
     runPlans = [{
       type: 'events',

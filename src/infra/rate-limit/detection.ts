@@ -23,8 +23,12 @@ const RATE_LIMIT_STREAM_MARKER_PATTERNS = [
 // Match the complete final agent_message item against known Codex notices.
 // Arbitrary promo_message text is excluded because it can also be an ordinary reply.
 // Templates follow UsageLimitReachedError::fmt in codex-rs/protocol/src/error.rs.
+const RETRY_MONTH_DAYS: Readonly<Record<string, number>> = {
+  jan: 31, feb: 28, mar: 31, apr: 30, may: 31, jun: 30,
+  jul: 31, aug: 31, sep: 30, oct: 31, nov: 30, dec: 31,
+};
 const RETRY_TIMESTAMP =
-  '(?:[A-Za-z]{3} \\d{1,2}(?:st|nd|rd|th), \\d{4} \\d{1,2}:\\d{2} (?:AM|PM)|\\d{1,2}:\\d{2} (?:AM|PM))';
+  `(?:(?<month>${Object.keys(RETRY_MONTH_DAYS).join('|')}) (?<day>[1-9]|[12]\\d|3[01])(?<ordinal>st|nd|rd|th), (?<year>\\d{4}) )?(?:[1-9]|1[0-2]):[0-5]\\d (?:AM|PM)`;
 const RETRY_SUFFIX = `try again(?: later| at ${RETRY_TIMESTAMP})`;
 
 const RATE_LIMIT_NOTICE_PATTERNS = [
@@ -70,6 +74,29 @@ const RATE_LIMIT_WORKSPACE_NOTICE_PATTERNS = [
   /^you hit your spend cap set by the owner of your workspace\. ask an owner to increase your spend cap to continue\.$/i,
 ] as const;
 
+function matchesRateLimitNotice(pattern: RegExp, text: string): boolean {
+  const match = pattern.exec(text);
+  if (!match) {
+    return false;
+  }
+  const date = match.groups;
+  if (!date?.month) {
+    return true;
+  }
+  const day = Number(date.day);
+  const year = Number(date.year);
+  const month = date.month.toLowerCase();
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = month === 'feb' && isLeapYear ? 29 : RETRY_MONTH_DAYS[month];
+  let ordinal = 'th';
+  if (day < 11 || day > 13) {
+    if (day % 10 === 1) ordinal = 'st';
+    if (day % 10 === 2) ordinal = 'nd';
+    if (day % 10 === 3) ordinal = 'rd';
+  }
+  return daysInMonth !== undefined && day <= daysInMonth && date.ordinal?.toLowerCase() === ordinal;
+}
+
 export function containsRateLimitMarker(text: string | undefined): boolean {
   if (!text) {
     return false;
@@ -85,7 +112,7 @@ export function isRateLimitNoticeResponse(text: string | undefined): boolean {
   if (!trimmed) {
     return false;
   }
-  return RATE_LIMIT_NOTICE_PATTERNS.some((pattern) => pattern.test(trimmed))
+  return RATE_LIMIT_NOTICE_PATTERNS.some((pattern) => matchesRateLimitNotice(pattern, trimmed))
     || RATE_LIMIT_WORKSPACE_NOTICE_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
