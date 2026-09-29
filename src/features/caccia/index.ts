@@ -125,9 +125,10 @@ export interface CacciaDependencies {
   fetchCodeRabbitReviewThreads(
     prNumber: number,
     projectCwd: string,
+    expectedHeadSha: string,
     signal?: AbortSignal,
   ): Promise<CacciaReviewThread[]>;
-  createTemporaryClone(prNumber: number): Promise<{ cwd: string }>;
+  createTemporaryClone(prNumber: number, expectedHeadSha: string): Promise<{ cwd: string }>;
   executeWorkflow(input: {
     prNumber: number;
     workflow: string;
@@ -213,9 +214,13 @@ async function waitForCodeRabbitReview(
 async function createTemporaryClone(
   input: CacciaInput,
   prNumber: number,
+  expectedHeadSha: string,
 ): Promise<{ cwd: string }> {
   assertNotAborted(input.abortSignal);
   const pullRequest = await fetchCacciaPullRequestDetails(prNumber, input.projectCwd, input.abortSignal);
+  if (pullRequest.headSha !== expectedHeadSha) {
+    throw new Error(`Pull request #${prNumber} head changed before creating its temporary clone`);
+  }
   const cloneCwd = mkdtempSync(join(tmpdir(), `takt-caccia-${prNumber}-`));
   try {
     registerOwnedTemporaryClone(cloneCwd);
@@ -343,9 +348,9 @@ function createProductionDependencies(input: CacciaInput): CacciaDependencies {
     detectVcsProvider: (projectCwd) => resolveConfigValue(projectCwd, 'vcsProvider') ?? detectVcsProvider(projectCwd),
     waitForCodeRabbitReview: (prNumber, options) =>
       waitForCodeRabbitReview(prNumber, input.projectCwd, options, input.abortSignal),
-    fetchCodeRabbitReviewThreads: (prNumber, projectCwd, signal) =>
-      fetchCodeRabbitReviewThreads(prNumber, projectCwd, signal),
-    createTemporaryClone: (prNumber) => createTemporaryClone(input, prNumber),
+    fetchCodeRabbitReviewThreads: (prNumber, projectCwd, expectedHeadSha, signal) =>
+      fetchCodeRabbitReviewThreads(prNumber, projectCwd, expectedHeadSha, signal),
+    createTemporaryClone: (prNumber, expectedHeadSha) => createTemporaryClone(input, prNumber, expectedHeadSha),
     executeWorkflow: (options) => executeCacciaWorkflow(input, options),
     commitAndPush: (cwd) => commitAndPush(cwd, input.projectCwd, input.abortSignal),
     resolveReviewThread: (threadId, projectCwd, signal) => resolveReviewThread(threadId, projectCwd, signal),
@@ -444,14 +449,20 @@ async function runCacciaWithDependencies(
     return finishResult(input, createResult(input, 'skipped', 0, 'CodeRabbit did not post within the wait limit'), dependencies);
   }
 
-  let threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd, input.abortSignal);
+  let reviewedHeadSha = initialReview.headSha;
+  let threads = await dependencies.fetchCodeRabbitReviewThreads(
+    prNumber,
+    input.projectCwd,
+    reviewedHeadSha,
+    input.abortSignal,
+  );
   if (threads.length === 0) {
     return finishResult(input, createResult(input, 'success', 0), dependencies);
   }
 
   for (let iteration = 0; iteration < input.settings.maxIterations; iteration += 1) {
     assertNotAborted(input.abortSignal);
-    const clone = await dependencies.createTemporaryClone(prNumber);
+    const clone = await dependencies.createTemporaryClone(prNumber, reviewedHeadSha);
     const pushed = await (async () => {
       try {
         const workflowResult = await dependencies.executeWorkflow({
@@ -481,7 +492,13 @@ async function runCacciaWithDependencies(
       throw new Error(`Timed out waiting for CodeRabbit to review pushed commit ${pushed.headSha}`);
     }
 
-    threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd, input.abortSignal);
+    reviewedHeadSha = review.headSha;
+    threads = await dependencies.fetchCodeRabbitReviewThreads(
+      prNumber,
+      input.projectCwd,
+      reviewedHeadSha,
+      input.abortSignal,
+    );
     if (threads.length === 0) {
       return finishResult(input, createResult(input, 'success', 0), dependencies);
     }

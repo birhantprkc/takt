@@ -193,6 +193,7 @@ describe('GitHub PR command boundary', () => {
         data: {
           repository: {
             pullRequest: {
+              headRefOid: 'head-7',
               reviewThreads: {
                 pageInfo: { hasNextPage: true, endCursor: 'cursor-1' },
                 nodes: [
@@ -230,6 +231,23 @@ describe('GitHub PR command boundary', () => {
                       }],
                     },
                   },
+                  {
+                    id: 'deleted-author-thread',
+                    isResolved: false,
+                    isOutdated: false,
+                    resolvedBy: null,
+                    comments: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [{
+                        path: 'src/a.ts',
+                        line: 10,
+                        originalLine: 10,
+                        body: 'comment from a deleted author',
+                        url: 'https://example.test/comment/5',
+                        author: null,
+                      }],
+                    },
+                  },
                 ],
               },
             },
@@ -240,6 +258,7 @@ describe('GitHub PR command boundary', () => {
         data: {
           repository: {
             pullRequest: {
+              headRefOid: 'head-7',
               reviewThreads: {
                 pageInfo: { hasNextPage: false, endCursor: null },
                 nodes: [{
@@ -266,7 +285,7 @@ describe('GitHub PR command boundary', () => {
       },
     );
 
-    const result = await fetchCodeRabbitReviewThreads(7, '/project', abortController.signal);
+    const result = await fetchCodeRabbitReviewThreads(7, '/project', 'head-7', abortController.signal);
 
     expect(result.map((thread) => thread.id)).toEqual(['outdated-bot-thread']);
     expect(execFile).toHaveBeenCalledTimes(3);
@@ -316,7 +335,7 @@ describe('GitHub PR command boundary', () => {
       return {};
     });
 
-    await expect(fetchCodeRabbitReviewThreads(7, '/project', abortController.signal)).rejects.toBe(abortError);
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7', abortController.signal)).rejects.toBe(abortError);
 
     expect(execFile).toHaveBeenCalledTimes(2);
     expect(execFile.mock.calls[1]?.[2]).toMatchObject({ signal: abortController.signal });
@@ -332,8 +351,76 @@ describe('GitHub PR command boundary', () => {
       { errors: [{ message: 'review thread access denied' }] },
     );
 
-    await expect(fetchCodeRabbitReviewThreads(7, '/project'))
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7'))
       .rejects.toThrow(/review thread access denied/u);
+  });
+
+  it('rejects thread retrieval when the locator head differs from the reviewed head', async () => {
+    queueAsyncGhResponses({
+      url: 'https://github.com/org/repo/pull/7',
+      headRefOid: 'head-8',
+    });
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7'))
+      .rejects.toThrow('Pull request #7 head changed before reading review threads');
+    expect(execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects thread data when the PR head changes after locator retrieval', async () => {
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'head-8',
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+      },
+    );
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7'))
+      .rejects.toThrow('Pull request #7 head changed while reading review threads');
+    expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails instead of treating an unresolved thread without a starter comment as resolved', async () => {
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'head-7',
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{
+                  id: 'empty-thread',
+                  isResolved: false,
+                  isOutdated: false,
+                  resolvedBy: null,
+                  comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+                }],
+              },
+            },
+          },
+        },
+      },
+    );
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7'))
+      .rejects.toThrow('Missing starter comment for review thread empty-thread in pull request #7');
   });
 
   it('resolves the requested review thread asynchronously without posting a PR comment', async () => {

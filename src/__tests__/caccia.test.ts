@@ -6,6 +6,7 @@ import { serializeGlobalConfig } from '../infra/config/global/globalConfigSerial
 import * as config from '../infra/config/index.js';
 import * as githubPr from '../infra/github/pr.js';
 import * as gitDetection from '../infra/git/detect.js';
+import * as taskClone from '../infra/task/clone-exec.js';
 import type { CacciaDependencies, CacciaInput, CacciaReviewThread } from '../features/caccia/index.js';
 import {
   getPullRequestNumberFromUrl,
@@ -215,6 +216,10 @@ describe('Caccia loop', () => {
       timeoutMs: 100,
       afterHeadSha: 'pushed-head-2',
     });
+    expect(vi.mocked(dependencies.fetchCodeRabbitReviewThreads).mock.calls.map(([, , expectedHeadSha]) => expectedHeadSha))
+      .toEqual(['reviewed-head', 'pushed-head-1', 'pushed-head-2']);
+    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(1, 42, 'reviewed-head');
+    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(2, 42, 'pushed-head-1');
     expect(events.indexOf('push:/tmp/caccia-clone-1'))
       .toBeLessThan(events.indexOf('resolve:finding-1:/project'));
     expect(events.indexOf('resolve:finding-1:/project'))
@@ -236,6 +241,13 @@ describe('Caccia loop', () => {
       afterHeadSha: 'pushed-head-1',
     });
     expect(dependencies.fetchCodeRabbitReviewThreads).toHaveBeenCalledTimes(1);
+    expect(dependencies.fetchCodeRabbitReviewThreads).toHaveBeenCalledWith(
+      42,
+      '/project',
+      'reviewed-head',
+      expect.any(AbortSignal),
+    );
+    expect(dependencies.createTemporaryClone).toHaveBeenCalledWith(42, 'reviewed-head');
     expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('finding-1', '/project', expect.any(AbortSignal));
     expect(dependencies.logResult).not.toHaveBeenCalled();
     expect(dependencies.removeTemporaryClone).toHaveBeenCalledWith('/tmp/caccia-clone-1');
@@ -253,8 +265,8 @@ describe('Caccia loop', () => {
     expect(result).toMatchObject({ outcome: 'limit', unresolvedCount: 1, exitCode: 1 });
     expect(dependencies.executeWorkflow).toHaveBeenCalledTimes(2);
     expect(dependencies.createTemporaryClone).toHaveBeenCalledTimes(2);
-    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(1, 42);
-    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(2, 42);
+    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(1, 42, 'reviewed-head');
+    expect(dependencies.createTemporaryClone).toHaveBeenNthCalledWith(2, 42, 'pushed-head-1');
     expect(dependencies.executeWorkflow).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({ cwd: '/tmp/caccia-clone-1' }),
@@ -356,8 +368,8 @@ describe('Caccia loop', () => {
 
       expect(statusSpy).toHaveBeenCalledTimes(2);
       expect(threadSpy).toHaveBeenCalledTimes(1);
-      expect(threadSpy).toHaveBeenCalledWith(42, '/project', expect.any(AbortSignal));
-      expect(threadSpy.mock.calls[0]?.[2]).toBe(statusSpy.mock.calls[0]?.[3]);
+      expect(threadSpy).toHaveBeenCalledWith(42, '/project', 'current-head', expect.any(AbortSignal));
+      expect(threadSpy.mock.calls[0]?.[3]).toBe(statusSpy.mock.calls[0]?.[3]);
       expect(result).toMatchObject({ outcome: 'success', exitCode: 0 });
     } finally {
       threadSpy.mockRestore();
@@ -365,6 +377,45 @@ describe('Caccia loop', () => {
       detectionSpy.mockRestore();
       configSpy.mockRestore();
       vi.useRealTimers();
+    }
+  });
+
+  it('does not create a clone when its independently fetched PR head differs from the reviewed head', async () => {
+    const configSpy = vi.spyOn(config, 'resolveConfigValue').mockReturnValue(undefined);
+    const detectionSpy = vi.spyOn(gitDetection, 'detectVcsProvider').mockReturnValue('github');
+    const statusSpy = vi.spyOn(githubPr, 'fetchCodeRabbitReviewStatus').mockResolvedValue({
+      headSha: 'reviewed-head',
+      hasCodeRabbitPost: true,
+      reviewedHeadShas: ['reviewed-head'],
+    });
+    const threadSpy = vi.spyOn(githubPr, 'fetchCodeRabbitReviewThreads').mockResolvedValue([{
+      ...thread('finding-1'),
+      path: 'src/example.ts',
+      url: 'https://github.com/nrslib/takt/pull/42#discussion_r1',
+      isOutdated: false,
+    }]);
+    const detailsSpy = vi.spyOn(githubPr, 'fetchCacciaPullRequestDetails').mockResolvedValue({
+      number: 42,
+      headBranch: 'feature/review',
+      headSha: 'newer-head',
+      headRepositorySshUrl: 'git@github.com:org/repo.git',
+    });
+    const cloneSpy = vi.spyOn(taskClone, 'cloneAndIsolateAbortable');
+
+    try {
+      await expect(runCaccia(standaloneInput()))
+        .rejects.toThrow('Pull request #42 head changed before creating its temporary clone');
+
+      expect(threadSpy).toHaveBeenCalledWith(42, '/project', 'reviewed-head', expect.any(AbortSignal));
+      expect(detailsSpy).toHaveBeenCalledWith(42, '/project', expect.any(AbortSignal));
+      expect(cloneSpy).not.toHaveBeenCalled();
+    } finally {
+      cloneSpy.mockRestore();
+      detailsSpy.mockRestore();
+      threadSpy.mockRestore();
+      statusSpy.mockRestore();
+      detectionSpy.mockRestore();
+      configSpy.mockRestore();
     }
   });
 

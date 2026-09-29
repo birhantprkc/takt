@@ -255,6 +255,7 @@ const CODERABBIT_REVIEW_THREADS_QUERY = `
 query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
+      headRefOid
       reviewThreads(first:${REVIEW_THREADS_PER_PAGE}, after:$endCursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -407,6 +408,36 @@ function parseReviewThreadsResponse(raw: string): GhGraphqlReviewThreadsConnecti
     throw new Error('Missing pull request reviewThreads in GraphQL response');
   }
 
+  return pullRequest.reviewThreads;
+}
+
+function parseCodeRabbitReviewThreadsResponse(
+  raw: string,
+  prNumber: number,
+  expectedHeadSha: string,
+): GhGraphqlReviewThreadsConnection {
+  const parsed = JSON.parse(raw) as {
+    data?: {
+      repository?: {
+        pullRequest?: {
+          headRefOid?: unknown;
+          reviewThreads?: GhGraphqlReviewThreadsConnection | null;
+        } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+
+  const pullRequest = parsed.data?.repository?.pullRequest;
+  if (!pullRequest?.reviewThreads) {
+    throw new Error(`Missing pull request reviewThreads in GraphQL response for pull request #${prNumber}`);
+  }
+  if (pullRequest.headRefOid !== expectedHeadSha) {
+    throw new Error(`Pull request #${prNumber} head changed while reading review threads`);
+  }
   return pullRequest.reviewThreads;
 }
 
@@ -841,9 +872,13 @@ function getReviewedHeadShaFromIssueComment(body: string): string | undefined {
 export async function fetchCodeRabbitReviewThreads(
   prNumber: number,
   cwd: string,
+  expectedHeadSha: string,
   signal?: AbortSignal,
 ): Promise<CodeRabbitReviewThread[]> {
   const locator = await fetchPullRequestLocatorAsync(prNumber, cwd, undefined, signal);
+  if (locator.headSha !== expectedHeadSha) {
+    throw new Error(`Pull request #${prNumber} head changed before reading review threads`);
+  }
   const threads: CodeRabbitReviewThread[] = [];
   let endCursor: string | undefined;
 
@@ -855,13 +890,16 @@ export async function fetchCodeRabbitReviewThreads(
       signal,
       GITHUB_REVIEW_COMMENT_PAGE_MAX_BUFFER_BYTES,
     );
-    const response = parseReviewThreadsResponse(raw);
+    const response = parseCodeRabbitReviewThreadsResponse(raw, prNumber, expectedHeadSha);
     for (const thread of response.nodes) {
       if (thread.isResolved) {
         continue;
       }
       const starter = thread.comments.nodes[0];
-      if (!starter || starter.author?.login.toLowerCase() !== CODERABBIT_LOGIN) {
+      if (!starter) {
+        throw new Error(`Missing starter comment for review thread ${thread.id} in pull request #${prNumber}`);
+      }
+      if (starter.author?.login.toLowerCase() !== CODERABBIT_LOGIN) {
         continue;
       }
       const line = starter.line ?? starter.originalLine ?? undefined;
