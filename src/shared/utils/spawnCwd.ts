@@ -1,15 +1,16 @@
-import { resolve, toNamespacedPath } from 'node:path';
+import { win32 } from 'node:path';
 
 const WINDOWS_MAX_PATH = 260;
 
-// On Windows, spawning with a cwd at or beyond MAX_PATH fails with a
-// misleading ENOENT for the executable. The namespaced form avoids that.
-// Shorter paths are passed through unchanged, and toNamespacedPath is a
-// no-op on POSIX hosts.
+// Win32 current directories need room for a trailing separator and the NUL.
+// Node 22 libuv calls GetShortPathNameW for long cwd values, so this still
+// depends on the volume providing a usable short path. The namespace lets
+// that Win32 lookup address the original long directory.
 export function resolveHelperSpawnCwd(cwd: string): string {
-  const absoluteCwd = resolve(cwd);
-  if (absoluteCwd.length < WINDOWS_MAX_PATH) {
+  if (process.platform !== 'win32') {
     return cwd;
   }
-  return toNamespacedPath(absoluteCwd);
+  const absoluteCwd = win32.resolve(cwd);
+  const terminatedLength = absoluteCwd.length + (absoluteCwd.endsWith('\\') ? 1 : 2);
+  return terminatedLength <= WINDOWS_MAX_PATH ? cwd : win32.toNamespacedPath(absoluteCwd);
 }

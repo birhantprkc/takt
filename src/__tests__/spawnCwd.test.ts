@@ -1,34 +1,40 @@
-import { resolve } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { win32 } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveHelperSpawnCwd } from '../shared/utils/spawnCwd.js';
 
-vi.mock('node:path', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:path')>();
-  return { ...actual, toNamespacedPath: (path: string) => `namespaced:${path}` };
+const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+
+afterEach(() => {
+  Object.defineProperty(process, 'platform', originalPlatform);
+  vi.restoreAllMocks();
 });
 
-const { resolveHelperSpawnCwd } = await import('../shared/utils/spawnCwd.js');
-
 describe('resolveHelperSpawnCwd', () => {
-  it('should leave a cwd shorter than MAX_PATH unchanged', () => {
-    const cwd = `/work/${'a'.repeat(250 - 6)}`;
-
-    expect(cwd.length).toBeLessThan(260);
+  it.each(['darwin', 'linux'])('should preserve long relative and symlink paths on %s', (platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+    const cwd = `linked/${'a'.repeat(280)}/../target`;
     expect(resolveHelperSpawnCwd(cwd)).toBe(cwd);
   });
 
-  it('should namespace a cwd at MAX_PATH or longer', () => {
-    const cwd = `/work/${'a'.repeat(260 - 6)}`;
+  it.each([
+    [258, false, false],
+    [259, false, true],
+    [259, true, false],
+    [260, true, true],
+    [260, false, true],
+  ] as const)(
+    'should handle a %i-character Windows cwd (trailing separator: %s)',
+    (length, trailingSeparator, namespaced) => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const cwd = `C:\\${'a'.repeat(length - 3 - Number(trailingSeparator))}${trailingSeparator ? '\\' : ''}`;
+      expect(cwd.length).toBe(length);
+      expect(resolveHelperSpawnCwd(cwd)).toBe(namespaced ? win32.toNamespacedPath(cwd) : cwd);
+    },
+  );
 
-    expect(cwd.length).toBe(260);
-    expect(resolveHelperSpawnCwd(cwd)).toBe(`namespaced:${resolve(cwd)}`);
-  });
-
-  it('should check the resolved length of a relative cwd', () => {
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(`/${'a'.repeat(300)}`);
-    try {
-      expect(resolveHelperSpawnCwd('b')).toBe(`namespaced:${resolve('b')}`);
-    } finally {
-      cwdSpy.mockRestore();
-    }
+  it('should check the resolved length of a relative Windows cwd', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    vi.spyOn(process, 'cwd').mockReturnValue(`C:\\${'a'.repeat(300)}`);
+    expect(resolveHelperSpawnCwd('b')).toBe(win32.toNamespacedPath('b'));
   });
 });
