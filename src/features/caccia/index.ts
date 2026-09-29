@@ -122,7 +122,11 @@ export interface CacciaDependencies {
     prNumber: number,
     options: CacciaReviewWaitOptions,
   ): Promise<{ headSha: string } | undefined>;
-  fetchCodeRabbitReviewThreads(prNumber: number, projectCwd: string): Promise<CacciaReviewThread[]>;
+  fetchCodeRabbitReviewThreads(
+    prNumber: number,
+    projectCwd: string,
+    signal?: AbortSignal,
+  ): Promise<CacciaReviewThread[]>;
   createTemporaryClone(prNumber: number): Promise<{ cwd: string }>;
   executeWorkflow(input: {
     prNumber: number;
@@ -132,7 +136,7 @@ export interface CacciaDependencies {
     task: string;
   }): Promise<{ reportPath: string; decisions: CacciaWorkflowDecision[] }>;
   commitAndPush(cwd: string): Promise<{ headSha: string }>;
-  resolveReviewThread(threadId: string, projectCwd: string): Promise<void>;
+  resolveReviewThread(threadId: string, projectCwd: string, signal?: AbortSignal): Promise<void>;
   removeTemporaryClone(cwd: string): Promise<void>;
   logResult(result: CacciaResult): void;
   notifyResult(result: CacciaResult): Promise<void>;
@@ -211,7 +215,7 @@ async function createTemporaryClone(
   prNumber: number,
 ): Promise<{ cwd: string }> {
   assertNotAborted(input.abortSignal);
-  const pullRequest = fetchCacciaPullRequestDetails(prNumber, input.projectCwd);
+  const pullRequest = await fetchCacciaPullRequestDetails(prNumber, input.projectCwd, input.abortSignal);
   const cloneCwd = mkdtempSync(join(tmpdir(), `takt-caccia-${prNumber}-`));
   try {
     registerOwnedTemporaryClone(cloneCwd);
@@ -339,11 +343,12 @@ function createProductionDependencies(input: CacciaInput): CacciaDependencies {
     detectVcsProvider: (projectCwd) => resolveConfigValue(projectCwd, 'vcsProvider') ?? detectVcsProvider(projectCwd),
     waitForCodeRabbitReview: (prNumber, options) =>
       waitForCodeRabbitReview(prNumber, input.projectCwd, options, input.abortSignal),
-    fetchCodeRabbitReviewThreads: async (prNumber, projectCwd) => fetchCodeRabbitReviewThreads(prNumber, projectCwd),
+    fetchCodeRabbitReviewThreads: (prNumber, projectCwd, signal) =>
+      fetchCodeRabbitReviewThreads(prNumber, projectCwd, signal),
     createTemporaryClone: (prNumber) => createTemporaryClone(input, prNumber),
     executeWorkflow: (options) => executeCacciaWorkflow(input, options),
     commitAndPush: (cwd) => commitAndPush(cwd, input.projectCwd, input.abortSignal),
-    resolveReviewThread: async (threadId, projectCwd) => resolveReviewThread(threadId, projectCwd),
+    resolveReviewThread: (threadId, projectCwd, signal) => resolveReviewThread(threadId, projectCwd, signal),
     removeTemporaryClone: async (cwd) => removeOwnedTemporaryClone(cwd, false),
     logResult: logCacciaResult,
     notifyResult: notifyCacciaResult,
@@ -439,7 +444,7 @@ async function runCacciaWithDependencies(
     return finishResult(input, createResult(input, 'skipped', 0, 'CodeRabbit did not post within the wait limit'), dependencies);
   }
 
-  let threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd);
+  let threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd, input.abortSignal);
   if (threads.length === 0) {
     return finishResult(input, createResult(input, 'success', 0), dependencies);
   }
@@ -460,7 +465,7 @@ async function runCacciaWithDependencies(
         assertEveryThreadWasDecided(threads, workflowResult.decisions);
         const pushResult = await dependencies.commitAndPush(clone.cwd);
         for (const thread of threads) {
-          await dependencies.resolveReviewThread(thread.id, input.projectCwd);
+          await dependencies.resolveReviewThread(thread.id, input.projectCwd, input.abortSignal);
         }
         return pushResult;
       } finally {
@@ -476,7 +481,7 @@ async function runCacciaWithDependencies(
       throw new Error(`Timed out waiting for CodeRabbit to review pushed commit ${pushed.headSha}`);
     }
 
-    threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd);
+    threads = await dependencies.fetchCodeRabbitReviewThreads(prNumber, input.projectCwd, input.abortSignal);
     if (threads.length === 0) {
       return finishResult(input, createResult(input, 'success', 0), dependencies);
     }

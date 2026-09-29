@@ -182,13 +182,14 @@ describe('GitHub PR command boundary', () => {
     ]));
   });
 
-  it('returns only unresolved CodeRabbit threads, using the thread starter and all pages', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('returns only unresolved CodeRabbit threads, using the first comment and all thread pages asynchronously', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -201,25 +202,15 @@ describe('GitHub PR command boundary', () => {
                     isOutdated: false,
                     resolvedBy: null,
                     comments: {
-                      pageInfo: { hasNextPage: false, endCursor: null },
-                      nodes: [
-                        {
-                          path: 'src/a.ts',
-                          line: 4,
-                          originalLine: 4,
-                          body: 'human started this thread',
-                          url: 'https://example.test/comment/1',
-                          author: { login: 'reviewer' },
-                        },
-                        {
-                          path: 'src/a.ts',
-                          line: 4,
-                          originalLine: 4,
-                          body: 'CodeRabbit replied to a human thread',
-                          url: 'https://example.test/comment/2',
-                          author: { login: 'coderabbitai' },
-                        },
-                      ],
+                      pageInfo: { hasNextPage: true, endCursor: 'reply-cursor' },
+                      nodes: [{
+                        path: 'src/a.ts',
+                        line: 4,
+                        originalLine: 4,
+                        body: 'human started this thread',
+                        url: 'https://example.test/comment/1',
+                        author: { login: 'reviewer' },
+                      }],
                     },
                   },
                   {
@@ -244,8 +235,8 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -272,36 +263,92 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }));
+      },
+    );
 
-    const result = fetchCodeRabbitReviewThreads(7, '/project');
+    const result = await fetchCodeRabbitReviewThreads(7, '/project', abortController.signal);
 
     expect(result.map((thread) => thread.id)).toEqual(['outdated-bot-thread']);
-    expect(execFileSync).toHaveBeenCalledTimes(3);
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(execFileSync).not.toHaveBeenCalled();
+    for (const [, args, options] of execFile.mock.calls) {
+      expect(options).toMatchObject({ signal: abortController.signal });
+      const query = (args as string[]).find((arg) => arg.startsWith('query='));
+      if (query?.includes('reviewThreads')) {
+        expect(query).toContain('comments(first:1)');
+        expect(options).toMatchObject({ maxBuffer: 64 * 1024 * 1024 });
+      }
+    }
   });
 
-  it('surfaces GitHub GraphQL errors while fetching CodeRabbit threads', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('aborts CodeRabbit thread retrieval while its asynchronous GitHub query is pending', async () => {
+    const abortController = new AbortController();
+    const abortError = Object.assign(new Error('The operation was aborted'), {
+      name: 'AbortError',
+      code: 'ABORT_ERR',
+    });
+    queueAsyncGhResponses({
+      url: 'https://github.com/org/repo/pull/7',
+      headRefOid: 'head-7',
+    });
+    let callCount = 0;
+    execFile.mockImplementation((
+      _command: string,
+      _args: string[],
+      rawOptions: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      callCount += 1;
+      const options = rawOptions as { signal?: AbortSignal };
+      if (callCount === 1) {
+        const response = asyncCommandResponses.shift();
+        queueMicrotask(() => {
+          if (response instanceof Error) {
+            callback(response, '', '');
+          } else {
+            callback(null, response ?? '', '');
+          }
+        });
+      } else {
+        options.signal?.addEventListener('abort', () => callback(abortError, '', ''), { once: true });
+        queueMicrotask(() => abortController.abort());
+      }
+      return {};
+    });
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', abortController.signal)).rejects.toBe(abortError);
+
+    expect(execFile).toHaveBeenCalledTimes(2);
+    expect(execFile.mock.calls[1]?.[2]).toMatchObject({ signal: abortController.signal });
+    expect(execFileSync).not.toHaveBeenCalled();
+  });
+
+  it('surfaces GitHub GraphQL errors while fetching CodeRabbit threads', async () => {
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({ errors: [{ message: 'review thread access denied' }] }));
+      },
+      { errors: [{ message: 'review thread access denied' }] },
+    );
 
-    expect(() => fetchCodeRabbitReviewThreads(7, '/project'))
-      .toThrow(/review thread access denied/u);
+    await expect(fetchCodeRabbitReviewThreads(7, '/project'))
+      .rejects.toThrow(/review thread access denied/u);
   });
 
-  it('resolves the requested review thread without posting a PR comment', () => {
-    execFileSync.mockReturnValue(JSON.stringify({
+  it('resolves the requested review thread asynchronously without posting a PR comment', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses({
       data: { resolveReviewThread: { thread: { id: 'thread-42', isResolved: true } } },
-    }));
+    });
 
-    resolveReviewThread('thread-42', '/project');
+    await resolveReviewThread('thread-42', '/project', abortController.signal);
 
-    expect(execFileSync).toHaveBeenCalledTimes(1);
-    const [binary, args] = execFileSync.mock.calls[0] as [string, string[]];
+    expect(execFile).toHaveBeenCalledTimes(1);
+    expect(execFileSync).not.toHaveBeenCalled();
+    const [binary, args, options] = execFile.mock.calls[0] as [string, string[], { signal?: AbortSignal }];
     expect(binary).toBe('gh');
+    expect(options.signal).toBe(abortController.signal);
     expect(args.slice(0, 2)).toEqual(['api', 'graphql']);
     expect(args).toContain('threadId=thread-42');
     const mutation = args.find((arg) => arg.startsWith('query='));
@@ -309,10 +356,10 @@ describe('GitHub PR command boundary', () => {
     expect(mutation).not.toContain('addPullRequestReviewComment');
   });
 
-  it('surfaces errors from the review thread Resolve mutation', () => {
-    execFileSync.mockReturnValue(JSON.stringify({ errors: [{ message: 'thread resolve denied' }] }));
+  it('surfaces errors from the review thread Resolve mutation', async () => {
+    queueAsyncGhResponses({ errors: [{ message: 'thread resolve denied' }] });
 
-    expect(() => resolveReviewThread('thread-42', '/project')).toThrow(/thread resolve denied/u);
+    await expect(resolveReviewThread('thread-42', '/project')).rejects.toThrow(/thread resolve denied/u);
   });
 
   it('reports CodeRabbit review completion only for the exact reviewed commit SHA', async () => {
@@ -608,13 +655,14 @@ describe('GitHub PR command boundary', () => {
     }
   });
 
-  it('returns the fork branch and exact PR head used to create an isolated clone', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('returns the fork branch and exact PR head used to create an isolated clone asynchronously', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -625,14 +673,20 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }));
+      },
+    );
 
-    expect(fetchCacciaPullRequestDetails(7, '/project')).toEqual({
+    await expect(fetchCacciaPullRequestDetails(7, '/project', abortController.signal)).resolves.toEqual({
       number: 7,
       headBranch: 'fix/review-thread',
       headSha: 'head-7',
       headRepositorySshUrl: 'git@github.com:contributor/repo.git',
     });
+    expect(execFile).toHaveBeenCalledTimes(2);
+    expect(execFileSync).not.toHaveBeenCalled();
+    for (const [, , options] of execFile.mock.calls) {
+      expect(options).toMatchObject({ signal: abortController.signal });
+    }
   });
 
   it('does not treat a dismissed CodeRabbit review as a completed review', async () => {

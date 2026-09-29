@@ -60,8 +60,8 @@ const OPEN_PRS_PER_PAGE = 100;
 const REVIEW_THREADS_PER_PAGE = 100;
 const REVIEW_THREAD_COMMENTS_PER_PAGE = 100;
 const GRAPHQL_PAGINATION_HARD_CAP = 100;
-// 100 comments × 65,536 characters × up to 6 JSON bytes per UTF-16 code unit is about 37.5 MiB.
-const CODERABBIT_ISSUE_COMMENTS_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+// 100 bodies × 65,536 UTF-16 code units × 6 escaped JSON bytes is about 37.5 MiB.
+const GITHUB_REVIEW_COMMENT_PAGE_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const DELETED_GITHUB_USER_AUTHOR = 'deleted GitHub user';
 const CODERABBIT_LOGIN = 'coderabbitai';
 const COMPLETED_REVIEW_STATES = new Set(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED']);
@@ -243,6 +243,35 @@ query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
         nodes {
           comments(first:1) {
             nodes { author { login } }
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
+const CODERABBIT_REVIEW_THREADS_QUERY = `
+query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      reviewThreads(first:${REVIEW_THREADS_PER_PAGE}, after:$endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          isOutdated
+          resolvedBy { login }
+          comments(first:1) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              path
+              line
+              originalLine
+              body
+              url
+              author { login }
+            }
           }
         }
       }
@@ -536,14 +565,6 @@ function isCommandTimeoutError(error: unknown): boolean {
     || (commandError.killed === true && commandError.signal === 'SIGKILL');
 }
 
-function runGhCommandSync(args: string[], cwd: string): string {
-  return execFileSync('gh', args, {
-    cwd,
-    encoding: 'utf-8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-}
-
 function runGhCommand(
   args: string[],
   cwd: string,
@@ -586,19 +607,11 @@ function parsePullRequestLocator(raw: string, prNumber: number): PullRequestLoca
   return { ...parseRepositoryFromPrUrl(response.url), headSha: response.headRefOid };
 }
 
-function fetchPullRequestLocator(
+async function fetchPullRequestLocatorAsync(
   prNumber: number,
   cwd: string,
-): PullRequestLocator {
-  const raw = runGhCommandSync(['pr', 'view', String(prNumber), '--json', 'url,headRefOid'], cwd);
-  return parsePullRequestLocator(raw, prNumber);
-}
-
-async function fetchPullRequestLocatorForReviewStatus(
-  prNumber: number,
-  cwd: string,
-  deadlineAt: number | undefined,
-  signal: AbortSignal | undefined,
+  deadlineAt?: number,
+  signal?: AbortSignal,
 ): Promise<PullRequestLocator> {
   const raw = await runGhCommand(
     ['pr', 'view', String(prNumber), '--json', 'url,headRefOid'],
@@ -792,7 +805,7 @@ async function fetchCodeRabbitIssueComments(
       cwd,
       deadlineAt,
       signal,
-      CODERABBIT_ISSUE_COMMENTS_MAX_BUFFER_BYTES,
+      GITHUB_REVIEW_COMMENT_PAGE_MAX_BUFFER_BYTES,
     );
     const response = parseCodeRabbitIssueCommentPage(raw, prNumber);
     comments.push(...response.nodes);
@@ -824,25 +837,30 @@ function getReviewedHeadShaFromIssueComment(body: string): string | undefined {
   return undefined;
 }
 
-/** Returns only unresolved review threads whose first comment was created by CodeRabbit. */
-export function fetchCodeRabbitReviewThreads(prNumber: number, cwd: string): CodeRabbitReviewThread[] {
-  const locator = fetchPullRequestLocator(prNumber, cwd);
+/** Returns unresolved review threads whose first comment was created by CodeRabbit. */
+export async function fetchCodeRabbitReviewThreads(
+  prNumber: number,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<CodeRabbitReviewThread[]> {
+  const locator = await fetchPullRequestLocatorAsync(prNumber, cwd, undefined, signal);
   const threads: CodeRabbitReviewThread[] = [];
   let endCursor: string | undefined;
 
   for (let page = 1; page <= GRAPHQL_PAGINATION_HARD_CAP; page += 1) {
-    const raw = execFileSync(
-      'gh',
-      buildReviewThreadsGraphqlArgs(locator.owner, locator.repo, prNumber, endCursor),
-      { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    const raw = await runGhCommand(
+      buildCodeRabbitGraphqlArgs(locator.owner, locator.repo, prNumber, CODERABBIT_REVIEW_THREADS_QUERY, endCursor),
+      cwd,
+      undefined,
+      signal,
+      GITHUB_REVIEW_COMMENT_PAGE_MAX_BUFFER_BYTES,
     );
     const response = parseReviewThreadsResponse(raw);
     for (const thread of response.nodes) {
       if (thread.isResolved) {
         continue;
       }
-      const comments = fetchReviewThreadComments(thread, prNumber, cwd);
-      const starter = comments[0];
+      const starter = thread.comments.nodes[0];
       if (!starter || starter.author?.login.toLowerCase() !== CODERABBIT_LOGIN) {
         continue;
       }
@@ -880,7 +898,7 @@ export async function fetchCodeRabbitReviewStatus(
   let threadAuthors: string[];
   let issueComments: CodeRabbitIssueComment[];
   try {
-    locator = await fetchPullRequestLocatorForReviewStatus(prNumber, cwd, deadlineAt, signal);
+    locator = await fetchPullRequestLocatorAsync(prNumber, cwd, deadlineAt, signal);
     reviews = await fetchCodeRabbitReviews(locator, prNumber, cwd, deadlineAt, signal);
     threadAuthors = await fetchCodeRabbitThreadStarters(locator, prNumber, cwd, deadlineAt, signal);
     issueComments = await fetchCodeRabbitIssueComments(locator, prNumber, cwd, deadlineAt, signal);
@@ -914,12 +932,17 @@ export async function fetchCodeRabbitReviewStatus(
 }
 
 /** Reads the current PR head and its push target without changing the project worktree. */
-export function fetchCacciaPullRequestDetails(prNumber: number, cwd: string): CacciaPullRequestDetails {
-  const locator = fetchPullRequestLocator(prNumber, cwd);
-  const raw = execFileSync(
-    'gh',
+export async function fetchCacciaPullRequestDetails(
+  prNumber: number,
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<CacciaPullRequestDetails> {
+  const locator = await fetchPullRequestLocatorAsync(prNumber, cwd, undefined, signal);
+  const raw = await runGhCommand(
     buildCodeRabbitGraphqlArgs(locator.owner, locator.repo, prNumber, CACCIA_PULL_REQUEST_QUERY, undefined),
-    { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    cwd,
+    undefined,
+    signal,
   );
   const parsed = JSON.parse(raw) as {
     data?: {
@@ -956,11 +979,12 @@ export function fetchCacciaPullRequestDetails(prNumber: number, cwd: string): Ca
 }
 
 /** Resolves the supplied GitHub review thread through its GraphQL thread ID. */
-export function resolveReviewThread(threadId: string, cwd: string): void {
-  const raw = execFileSync(
-    'gh',
+export async function resolveReviewThread(threadId: string, cwd: string, signal?: AbortSignal): Promise<void> {
+  const raw = await runGhCommand(
     ['api', 'graphql', '-f', `threadId=${threadId}`, '-f', `query=${RESOLVE_REVIEW_THREAD_MUTATION}`],
-    { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    cwd,
+    undefined,
+    signal,
   );
   const parsed = JSON.parse(raw) as {
     data?: { resolveReviewThread?: { thread?: { id: string; isResolved: boolean } | null } | null };

@@ -236,7 +236,7 @@ describe('Caccia loop', () => {
       afterHeadSha: 'pushed-head-1',
     });
     expect(dependencies.fetchCodeRabbitReviewThreads).toHaveBeenCalledTimes(1);
-    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('finding-1', '/project');
+    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('finding-1', '/project', expect.any(AbortSignal));
     expect(dependencies.logResult).not.toHaveBeenCalled();
     expect(dependencies.removeTemporaryClone).toHaveBeenCalledWith('/tmp/caccia-clone-1');
   });
@@ -356,6 +356,8 @@ describe('Caccia loop', () => {
 
       expect(statusSpy).toHaveBeenCalledTimes(2);
       expect(threadSpy).toHaveBeenCalledTimes(1);
+      expect(threadSpy).toHaveBeenCalledWith(42, '/project', expect.any(AbortSignal));
+      expect(threadSpy.mock.calls[0]?.[2]).toBe(statusSpy.mock.calls[0]?.[3]);
       expect(result).toMatchObject({ outcome: 'success', exitCode: 0 });
     } finally {
       threadSpy.mockRestore();
@@ -499,8 +501,8 @@ describe('Caccia loop', () => {
     }));
     expect(dependencies.commitAndPush).toHaveBeenCalledWith('/tmp/caccia-clone-1');
     expect(dependencies.resolveReviewThread).toHaveBeenCalledTimes(2);
-    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('valid-finding', '/project');
-    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('invalid-finding', '/project');
+    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('valid-finding', '/project', expect.any(AbortSignal));
+    expect(dependencies.resolveReviewThread).toHaveBeenCalledWith('invalid-finding', '/project', expect.any(AbortSignal));
     expect(events.indexOf('push:/tmp/caccia-clone-1'))
       .toBeLessThan(events.indexOf('resolve:valid-finding:/project'));
   });
@@ -530,8 +532,8 @@ describe('Caccia loop', () => {
     await expect(runCaccia(standaloneInput(), dependencies)).rejects.toThrow();
 
     expect(dependencies.commitAndPush).toHaveBeenCalledWith('/tmp/caccia-clone-1');
-    expect(dependencies.resolveReviewThread).toHaveBeenNthCalledWith(1, 'finding-1', '/project');
-    expect(dependencies.resolveReviewThread).toHaveBeenNthCalledWith(2, 'finding-2', '/project');
+    expect(dependencies.resolveReviewThread).toHaveBeenNthCalledWith(1, 'finding-1', '/project', expect.any(AbortSignal));
+    expect(dependencies.resolveReviewThread).toHaveBeenNthCalledWith(2, 'finding-2', '/project', expect.any(AbortSignal));
     expect(dependencies.waitForCodeRabbitReview).toHaveBeenCalledTimes(1);
     expect(dependencies.removeTemporaryClone).toHaveBeenCalledWith('/tmp/caccia-clone-1');
   });
