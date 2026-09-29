@@ -81,6 +81,10 @@ takt list
 
 初回実行時は `~/.takt/config.yaml` で provider を設定するか、[設定](#設定) にある API キー用の環境変数を使います。`claude-sdk`、`codex`、`pi` などの SDK 経由 provider は Node.js と認証情報で動きます。`deepseek-harness` は対応 platform で `takt deepseek-harness install` が作成する uv-managed environment も必要です。CLI 経由 provider を使う場合は対応する外部 CLI が必要です。
 
+## CodeRabbit レビューループ
+
+GitHub PR に対して `takt caccia <PR番号>` を実行すると、CodeRabbit のレビューを待ち、隔離クローンで未解決の bot スレッドに対応し、反復ごとの判断レポートを保存します。`caccia.enabled` を有効にすると、TAKT が PR を作成・更新した後にも同じループを連結できます。連結経路はデフォルトで無効です。[CLI リファレンス](./cli-reference.ja.md#takt-caccia)と[設定ガイド](./configuration.ja.md)を参照してください。
+
 ### 動画チュートリアル
 
 [文章版チュートリアル](./tutorial.ja.md)に沿って実際に操作する様子を次の動画で確認できます。

@@ -200,6 +200,7 @@ assistant:
 | `allow_git_hooks` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git hooks |
 | `allow_git_filters` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git filters |
 | `auto_pr` | boolean | - | worktree 执行后自动创建 PR |
+| `caccia` | object | `{ enabled: false, wait_timeout_ms: 600000, max_iterations: 3, workflow: "caccia" }` | CodeRabbit 审查循环设置 |
 | `draft_pr` | boolean | `false` | 将自动创建的 PR 设为 draft |
 | `minimal_output` | boolean | `false` | 抑制 AI 输出（用于 CI） |
 | `runtime` | object | - | 运行环境默认值，例如 `prepare: [gradle, node]` |
@@ -242,6 +243,22 @@ assistant:
 | `workflow_overrides` | object | - | workflow 级 `quality_gates` 与 `quality_gates_edit_only` 覆盖 |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver 策略 |
 | `observability` | object | disabled | opt-in OpenTelemetry 基础设施 |
+
+## Caccia Review Loop
+
+`caccia` 可以设置在 `~/.takt/config.yaml` 或 `.takt/config.yaml` 中：
+
+```yaml
+caccia:
+  enabled: false          # 任务创建或更新 PR 后启用自动关联
+  wait_timeout_ms: 600000 # 等待初次审查和每次推送提交审查的上限（毫秒）
+  max_iterations: 3       # 修复和复审的最大轮数
+  workflow: caccia        # 用于判断和修复每组线程的 workflow
+```
+
+只有 `enabled: true` 时才运行自动关联。无论该开关为何值，都可以手动运行 `takt caccia <PR-number>`。默认值为关闭、600,000 毫秒、3 轮和 workflow `caccia`。如果项目中存在 `caccia` 配置块，它整体优先于全局块；所选配置块中省略的字段使用上述默认值。将 `workflow` 设置为 workflow 标识符即可替换 builtin workflow。
+
+`wait_timeout_ms` 同时适用于初次审查检查和每次推送提交后的复审等待。初次等待超时会跳过 Caccia；单独命令以非零状态退出，自动关联路径会安静跳过并保留任务结果。等待推送提交的复审超时则属于执行错误：单独命令以非零状态退出，自动关联路径会记录错误并保留已完成的任务结果。
 
 ## 项目配置
 
@@ -367,6 +384,7 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 | `allow_git_hooks` | boolean | `false` | 自动 commit 时允许 git hooks |
 | `allow_git_filters` | boolean | `false` | 自动 commit 时允许 git filters |
 | `auto_pr` | boolean | - | worktree 执行后自动创建 PR |
+| `caccia` | object | disabled | CodeRabbit 审查循环设置（见上文） |
 | `draft_pr` | boolean | `false`（来自全局） | 将自动创建的 PR 设为 draft |
 | `concurrency` | number (1-10) | `1`（来自全局） | `takt run` 并行任务数 |
 | `auto_requeue_max_attempts` | 非负整数 | `0` | 失败 workflow task 的自动 requeue 上限 |

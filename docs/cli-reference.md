@@ -353,6 +353,18 @@ takt watch --ignore-exceed
 
 `takt watch --ignore-exceed` has the same semantics as `takt run --ignore-exceed`: it ignores the workflow `max_steps` iteration limit and does not write `exceeded` retry metadata to `.takt/tasks.yaml`.
 
+### takt caccia
+
+Wait for CodeRabbit and handle its unresolved review threads on an existing GitHub pull request. Each iteration runs the configured Caccia workflow in a temporary clone, records a decision report under `.takt/runs/`, pushes fixes, resolves the reviewed CodeRabbit threads, and waits for a review of the pushed commit. Human-started review threads are left untouched, and Caccia does not post pull-request comments or replies.
+
+```bash
+takt caccia 123
+```
+
+The PR number is required. Exit code `0` means no unresolved CodeRabbit threads remain after review. A non-zero code indicates that the repository is not using GitHub, CodeRabbit did not post before the wait limit, the iteration limit was reached, or execution failed. The iteration-limit message includes the number of remaining threads. This command requires an authenticated GitHub CLI (`gh`).
+
+The `wait_timeout_ms` limit applies to the initial CodeRabbit check and to each review of a pushed commit. If the initial check times out, Caccia skips processing and this command exits non-zero. If a review of a pushed commit does not arrive before the limit, the run fails and this command exits non-zero.
+
 ### takt list
 
 List task branches and perform actions (merge, delete, merge from root, etc.).
