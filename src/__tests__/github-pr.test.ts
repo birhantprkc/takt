@@ -289,6 +289,7 @@ describe('GitHub PR command boundary', () => {
     const result = await fetchCodeRabbitReviewThreads(7, '/project', 'head-7', abortController.signal);
 
     expect(result.map((thread) => thread.id)).toEqual(['outdated-bot-thread']);
+    expect(result[0]?.replies).toEqual([]);
     expect(execFile).toHaveBeenCalledTimes(3);
     expect(execFileSync).not.toHaveBeenCalled();
     for (const [, args, options] of execFile.mock.calls) {
@@ -299,6 +300,211 @@ describe('GitHub PR command boundary', () => {
         expect(options).toMatchObject({ maxBuffer: 64 * 1024 * 1024 });
       }
     }
+  });
+
+  it('fetches every CodeRabbit thread reply asynchronously and includes reply authors and bodies', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'head-7',
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{
+                  id: 'bot-thread',
+                  isResolved: false,
+                  isOutdated: false,
+                  resolvedBy: null,
+                  comments: {
+                    pageInfo: { hasNextPage: true, endCursor: 'starter-cursor' },
+                    nodes: [{
+                      path: 'src/a.ts',
+                      line: 4,
+                      originalLine: 4,
+                      body: 'finding',
+                      url: 'https://example.test/comment/1',
+                      author: { login: 'coderabbitai' },
+                    }],
+                  },
+                }],
+              },
+            },
+          },
+        },
+      },
+      {
+        data: {
+          node: {
+            comments: {
+              pageInfo: { hasNextPage: true, endCursor: 'reply-cursor-1' },
+              nodes: [{ body: 'Please retain compatibility with v1.', author: { login: 'maintainer' } }],
+            },
+          },
+        },
+      },
+      {
+        data: {
+          node: {
+            comments: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [{ body: 'Thanks, I will update the finding.', author: { login: 'coderabbitai' } }],
+            },
+          },
+        },
+      },
+    );
+
+    const result = await fetchCodeRabbitReviewThreads(7, '/project', 'head-7', abortController.signal);
+
+    expect(result).toEqual([expect.objectContaining({
+      id: 'bot-thread',
+      replies: [
+        { author: 'maintainer', body: 'Please retain compatibility with v1.' },
+        { author: 'coderabbitai', body: 'Thanks, I will update the finding.' },
+      ],
+    })]);
+    expect(execFile).toHaveBeenCalledTimes(4);
+    expect(execFileSync).not.toHaveBeenCalled();
+    for (const [, args, options] of execFile.mock.calls.slice(2)) {
+      expect(options).toMatchObject({ signal: abortController.signal, maxBuffer: 64 * 1024 * 1024 });
+      const query = (args as string[]).find((arg) => arg.startsWith('query='));
+      expect(query).toContain('comments(first:100, after:$commentsEndCursor)');
+      expect(query).toContain('body');
+      expect(query).toContain('author { login }');
+    }
+    expect(execFile.mock.calls[2]?.[1]).toContain('threadId=bot-thread');
+    expect(execFile.mock.calls[2]?.[1]).toContain('commentsEndCursor=starter-cursor');
+    expect(execFile.mock.calls[3]?.[1]).toContain('commentsEndCursor=reply-cursor-1');
+  });
+
+  it('aborts while asynchronously fetching CodeRabbit thread replies', async () => {
+    const abortController = new AbortController();
+    const abortError = Object.assign(new Error('The operation was aborted'), {
+      name: 'AbortError',
+      code: 'ABORT_ERR',
+    });
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'head-7',
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{
+                  id: 'bot-thread',
+                  isResolved: false,
+                  isOutdated: false,
+                  resolvedBy: null,
+                  comments: {
+                    pageInfo: { hasNextPage: true, endCursor: 'starter-cursor' },
+                    nodes: [{
+                      path: 'src/a.ts',
+                      line: 4,
+                      originalLine: 4,
+                      body: 'finding',
+                      url: 'https://example.test/comment/1',
+                      author: { login: 'coderabbitai' },
+                    }],
+                  },
+                }],
+              },
+            },
+          },
+        },
+      },
+    );
+    execFile.mockImplementation((
+      _command: string,
+      args: string[],
+      rawOptions: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const options = rawOptions as { signal?: AbortSignal };
+      if (args.includes('commentsEndCursor=starter-cursor')) {
+        options.signal?.addEventListener('abort', () => callback(abortError, '', ''), { once: true });
+        queueMicrotask(() => abortController.abort());
+      } else {
+        const response = asyncCommandResponses.shift();
+        queueMicrotask(() => {
+          if (response instanceof Error) {
+            callback(response, '', '');
+          } else {
+            callback(null, response ?? '', '');
+          }
+        });
+      }
+      return {};
+    });
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7', abortController.signal))
+      .rejects.toBe(abortError);
+
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(execFile.mock.calls[2]?.[2]).toMatchObject({ signal: abortController.signal });
+    expect(execFileSync).not.toHaveBeenCalled();
+  });
+
+  it('fails instead of silently truncating replies beyond the pagination cap', async () => {
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              headRefOid: 'head-7',
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [{
+                  id: 'bot-thread',
+                  isResolved: false,
+                  isOutdated: false,
+                  resolvedBy: null,
+                  comments: {
+                    pageInfo: { hasNextPage: true, endCursor: 'starter-cursor' },
+                    nodes: [{
+                      path: 'src/a.ts',
+                      line: 4,
+                      originalLine: 4,
+                      body: 'finding',
+                      url: 'https://example.test/comment/1',
+                      author: { login: 'coderabbitai' },
+                    }],
+                  },
+                }],
+              },
+            },
+          },
+        },
+      },
+      ...Array.from({ length: 100 }, (_, index) => ({
+        data: {
+          node: {
+            comments: {
+              pageInfo: { hasNextPage: true, endCursor: `reply-cursor-${index + 1}` },
+              nodes: [],
+            },
+          },
+        },
+      })),
+    );
+
+    await expect(fetchCodeRabbitReviewThreads(7, '/project', 'head-7'))
+      .rejects.toThrow('Pagination limit exceeded while fetching replies for review thread bot-thread in pull request #7');
+    expect(execFile).toHaveBeenCalledTimes(102);
   });
 
   it('aborts CodeRabbit thread retrieval while its asynchronous GitHub query is pending', async () => {

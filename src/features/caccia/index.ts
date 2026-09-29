@@ -80,6 +80,7 @@ export interface CacciaReviewThread {
   id: string;
   author: string;
   body: string;
+  replies: Array<{ author: string; body: string }>;
   path?: string;
   line?: number;
   url?: string;
@@ -483,6 +484,14 @@ async function runCacciaWithDependencies(
         assertNotAborted(input.abortSignal);
         assertEveryThreadWasDecided(threads, workflowResult.decisions);
         const pushResult = await dependencies.commitAndPush(clone.cwd);
+        if (
+          pushResult.headSha === reviewedHeadSha
+          && workflowResult.decisions.some((decision) => decision.valid)
+        ) {
+          throw new Error(
+            `Pull request #${prNumber} has valid review findings but no new commit was pushed; leaving review threads unresolved`,
+          );
+        }
         for (const thread of threads) {
           const currentHeadSha = await dependencies.fetchCurrentPullRequestHeadSha(
             prNumber,

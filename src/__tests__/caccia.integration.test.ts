@@ -94,7 +94,7 @@ describe('Caccia report lifecycle', () => {
     const cloneCwd = mkdtempSync(join(tmpdir(), 'takt-caccia-clone-'));
     temporaryRoots.push(projectCwd, cloneCwd);
     const reportPath = join(projectCwd, '.takt', 'runs', 'caccia-run', 'report.md');
-    const threads = [{ id: 'finding-1', author: 'coderabbitai', body: 'Fix the changed call site.' }];
+    const threads = [{ id: 'finding-1', author: 'coderabbitai', body: 'Fix the changed call site.', replies: [] }];
     const waitForCodeRabbitReview = vi.fn(async () => ({ headSha: 'reviewed-head' }));
     const fetchCodeRabbitReviewThreads = vi.fn()
       .mockResolvedValueOnce(threads)

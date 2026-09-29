@@ -436,6 +436,7 @@ describe('Caccia real Git isolation', () => {
       id: 'thread-42',
       author: 'coderabbitai',
       body: 'Apply the requested correction.',
+      replies: [],
     }]);
     mockMkdtempSync.mockImplementationOnce((prefix: string) => {
       if (!prefix.endsWith('takt-caccia-42-')) {
@@ -495,6 +496,7 @@ describe('Caccia real Git isolation', () => {
       id: 'thread-42',
       author: 'coderabbitai',
       body: 'Apply the requested correction.',
+      replies: [],
     }]);
     mockRunWorkflowExecution.mockClear();
     mockMkdtempSync.mockClear();
@@ -579,7 +581,7 @@ describe('Caccia real Git isolation', () => {
       return { headSha, hasCodeRabbitPost: true, reviewedHeadShas: [headSha] };
     });
     mockFetchCodeRabbitReviewThreads
-      .mockReturnValueOnce([{ id: 'thread-42', author: 'coderabbitai', body: 'Add the requested correction.' }])
+      .mockReturnValueOnce([{ id: 'thread-42', author: 'coderabbitai', body: 'Add the requested correction.', replies: [] }])
       .mockReturnValueOnce([]);
     mockResolveReviewThread.mockReturnValue(undefined);
     let cloneCwd: string | undefined;

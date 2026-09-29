@@ -70,6 +70,7 @@ export interface CodeRabbitReviewThread {
   id: string;
   author: string;
   body: string;
+  replies: Array<{ author: string; body: string }>;
   path: string;
   line?: number;
   url: string;
@@ -281,6 +282,22 @@ query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
 }
 `;
 
+const CODERABBIT_REVIEW_THREAD_REPLIES_QUERY = `
+query($threadId:ID!, $commentsEndCursor:String) {
+  node(id:$threadId) {
+    ... on PullRequestReviewThread {
+      comments(first:${REVIEW_THREAD_COMMENTS_PER_PAGE}, after:$commentsEndCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          body
+          author { login }
+        }
+      }
+    }
+  }
+}
+`;
+
 const CACCIA_PULL_REQUEST_QUERY = `
 query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
@@ -328,6 +345,26 @@ interface GhGraphqlReviewThreadCommentsResponse {
     node: GhGraphqlReviewThreadCommentsNode | null;
   };
   errors?: Array<{ message: string }>;
+}
+
+interface GhGraphqlCodeRabbitRepliesResponse {
+  data?: {
+    node?: {
+      comments?: GhGraphqlCodeRabbitRepliesConnection | null;
+    } | null;
+  };
+  errors?: Array<{ message: string }>;
+}
+
+interface GhGraphqlCodeRabbitRepliesConnection {
+  pageInfo: {
+    hasNextPage: boolean;
+    endCursor: string | null;
+  };
+  nodes: Array<{
+    body: string;
+    author: { login: string } | null;
+  }>;
 }
 
 interface GhGraphqlReviewThreadCommentsNode {
@@ -397,6 +434,19 @@ function buildReviewThreadCommentsGraphqlArgs(threadId: string, commentsEndCurso
   ];
 }
 
+function buildCodeRabbitReviewThreadRepliesGraphqlArgs(threadId: string, commentsEndCursor: string): string[] {
+  return [
+    'api',
+    'graphql',
+    '-f',
+    `threadId=${threadId}`,
+    '-f',
+    `commentsEndCursor=${commentsEndCursor}`,
+    '-f',
+    `query=${CODERABBIT_REVIEW_THREAD_REPLIES_QUERY}`,
+  ];
+}
+
 function parseReviewThreadsResponse(raw: string): GhGraphqlReviewThreadsConnection {
   const parsed = JSON.parse(raw) as GhGraphqlReviewThreadsResponse;
   if (parsed.errors && parsed.errors.length > 0) {
@@ -455,6 +505,24 @@ function parseReviewThreadCommentsResponse(raw: string): GhGraphqlReviewThreadCo
   return thread.comments;
 }
 
+function parseCodeRabbitReviewThreadRepliesResponse(
+  raw: string,
+  threadId: string,
+  prNumber: number,
+): GhGraphqlCodeRabbitRepliesConnection {
+  const parsed = JSON.parse(raw) as GhGraphqlCodeRabbitRepliesResponse;
+  if (parsed.errors && parsed.errors.length > 0) {
+    throw new Error(parsed.errors.map((error) => error.message).join('; '));
+  }
+
+  const comments = parsed.data?.node?.comments;
+  if (!comments) {
+    throw new Error(`Missing comments for review thread ${threadId} in pull request #${prNumber}`);
+  }
+
+  return comments;
+}
+
 function resolveThreadState(thread: GhGraphqlReviewThread): PrReviewThreadState {
   if (thread.isResolved) {
     return 'resolved';
@@ -470,6 +538,44 @@ function resolveReviewThreadCommentAuthor(comment: GhGraphqlReviewThreadComment)
     return comment.author.login;
   }
   return DELETED_GITHUB_USER_AUTHOR;
+}
+
+async function fetchCodeRabbitReviewThreadReplies(
+  threadId: string,
+  initialEndCursor: string | null,
+  cwd: string,
+  prNumber: number,
+  signal: AbortSignal | undefined,
+): Promise<Array<{ author: string; body: string }>> {
+  if (!initialEndCursor) {
+    throw new Error(`Missing starter comment cursor for review thread ${threadId} in pull request #${prNumber}`);
+  }
+
+  const replies: Array<{ author: string; body: string }> = [];
+  let endCursor = initialEndCursor;
+  for (let page = 1; page <= GRAPHQL_PAGINATION_HARD_CAP; page += 1) {
+    const raw = await runGhCommand(
+      buildCodeRabbitReviewThreadRepliesGraphqlArgs(threadId, endCursor),
+      cwd,
+      undefined,
+      signal,
+      GITHUB_REVIEW_COMMENT_PAGE_MAX_BUFFER_BYTES,
+    );
+    const response = parseCodeRabbitReviewThreadRepliesResponse(raw, threadId, prNumber);
+    replies.push(...response.nodes.map((comment) => ({
+      author: comment.author?.login ?? DELETED_GITHUB_USER_AUTHOR,
+      body: comment.body,
+    })));
+    if (!response.pageInfo.hasNextPage) {
+      return replies;
+    }
+    if (!response.pageInfo.endCursor) {
+      throw new Error(`Missing reply endCursor for review thread ${threadId} in pull request #${prNumber}`);
+    }
+    endCursor = response.pageInfo.endCursor;
+  }
+
+  throw new Error(`Pagination limit exceeded while fetching replies for review thread ${threadId} in pull request #${prNumber} (>${GRAPHQL_PAGINATION_HARD_CAP} pages)`);
 }
 
 function fetchReviewThreadComments(
@@ -907,6 +1013,15 @@ export async function fetchCodeRabbitReviewThreads(
         id: thread.id,
         author: starter.author.login,
         body: starter.body,
+        replies: thread.comments.pageInfo.hasNextPage
+          ? await fetchCodeRabbitReviewThreadReplies(
+            thread.id,
+            thread.comments.pageInfo.endCursor,
+            cwd,
+            prNumber,
+            signal,
+          )
+          : [],
         path: starter.path,
         ...(line === undefined ? {} : { line }),
         url: starter.url,
