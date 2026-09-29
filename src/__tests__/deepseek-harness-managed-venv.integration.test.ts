@@ -267,7 +267,7 @@ class DeepSeekHarnessConfig:
 `
     : `
 class DeepSeekHarnessConfig:
-    def __init__(self, provider, model, cwd, runtime_cwd, max_tokens=None, request_timeout_seconds=None, shutdown_timeout_seconds=None, reasoning_effort=None):
+    def __init__(self, provider, model, cwd, runtime_cwd, max_tokens=None, request_timeout_seconds=None, shutdown_timeout_seconds=None, reasoning_effort=None, patches=None):
         self.kwargs = {
             'provider': provider,
             'model': model,
@@ -281,6 +281,8 @@ class DeepSeekHarnessConfig:
             if reasoning_effort not in ('off', 'low', 'high', 'max'):
                 raise ValueError('unsupported reasoning_effort')
             self.kwargs['reasoning_effort'] = reasoning_effort
+        if patches is not None:
+            self.kwargs['patches'] = list(patches)
 `;
   const constructor = `    def __init__(self, **kwargs):
         self.config = DeepSeekHarnessConfig(**kwargs)

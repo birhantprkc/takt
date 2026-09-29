@@ -1,12 +1,19 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { resolveNpmInvocation } from '../../scripts/npm-invocation.mjs';
+import {
+  callDeepSeekHarness,
+  closeDeepSeekHarnessProcesses,
+} from '../infra/deepseek-harness/index.js';
 
 const liveSmokeEnabled = process.env.TAKT_DEEPSEEK_HARNESS_LIVE === '1';
+const storeOnlyHarnessHome = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+const storeOnlyCredentialAvailable = existsSync(path.join(storeOnlyHarnessHome, '.credentials.yaml'));
 const supportedRuntime = (
   (process.platform === 'linux' && (process.arch === 'x64' || process.arch === 'arm64'))
   || (process.platform === 'darwin' && process.arch === 'arm64')
@@ -143,4 +150,37 @@ describe('DeepSeek Harness live smoke', () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 180_000);
+
+  it.skipIf(!liveSmokeEnabled || !storeOnlyCredentialAvailable)(
+    'runs Flash and Pro turns from the official credential store without DEEPSEEK_API_KEY',
+    async () => {
+      if (!supportedRuntime) {
+        throw new Error('DeepSeek Harness store-only live smoke requires Linux x64/arm64 or macOS arm64');
+      }
+      const workspace = await mkdtemp(path.join(os.tmpdir(), 'takt-deepseek-store-only-smoke-'));
+      const previousApiKey = process.env.DEEPSEEK_API_KEY;
+      delete process.env.DEEPSEEK_API_KEY;
+      try {
+        for (const model of ['deepseek-v4-flash', 'deepseek-v4-pro'] as const) {
+          const response = await callDeepSeekHarness(
+            'live-smoke',
+            'Reply with a short confirmation that the store-only DeepSeek Harness smoke test completed.',
+            { cwd: workspace, model },
+          );
+
+          expect(response.status).toBe('done');
+          expect(response.content.trim().length).toBeGreaterThan(0);
+        }
+      } finally {
+        await closeDeepSeekHarnessProcesses();
+        if (previousApiKey === undefined) {
+          delete process.env.DEEPSEEK_API_KEY;
+        } else {
+          process.env.DEEPSEEK_API_KEY = previousApiKey;
+        }
+        await rm(workspace, { recursive: true, force: true });
+      }
+    },
+    300_000,
+  );
 });

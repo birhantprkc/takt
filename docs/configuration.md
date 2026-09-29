@@ -95,7 +95,7 @@ assistant:
 #     default_permission_mode: edit
 
 # API Key configuration (optional)
-# Can be overridden by environment variables TAKT_ANTHROPIC_API_KEY / TAKT_OPENAI_API_KEY / TAKT_OPENCODE_API_KEY / TAKT_CURSOR_API_KEY / TAKT_COPILOT_GITHUB_TOKEN / TAKT_KIRO_API_KEY. DeepSeek Harness uses the official DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL environment variables (not YAML API-key fields).
+# Can be overridden by environment variables TAKT_ANTHROPIC_API_KEY / TAKT_OPENAI_API_KEY / TAKT_OPENCODE_API_KEY / TAKT_CURSOR_API_KEY / TAKT_COPILOT_GITHUB_TOKEN / TAKT_KIRO_API_KEY. DeepSeek Harness uses its official credential store ($DSH_HOME/.credentials.yaml, default ~/.dsh/.credentials.yaml) or DEEPSEEK_API_KEY, with optional DEEPSEEK_BASE_URL (not YAML API-key fields).
 # anthropic_api_key: sk-ant-...  # For Claude (Anthropic)
 # openai_api_key: sk-...         # For Codex (OpenAI)
 # opencode_api_key: ...          # For OpenCode
@@ -470,7 +470,7 @@ Separately from config-key overrides, `TAKT_NOTIFY_WEBHOOK` sets a Slack Incomin
 
 ## API Key Configuration
 
-TAKT supports Claude, Codex, OpenCode, Pi, the official DeepSeek Harness SDK, Cursor, Copilot, and Kiro providers. Claude/Codex/OpenCode use their SDK credentials, Pi uses the Pi SDK credential store or provider environment variables, DeepSeek Harness uses the official `DEEPSEEK_API_KEY` environment variable, Kiro uses an API key, Cursor can use either API key or existing `cursor-agent login` session, and Copilot uses a GitHub token.
+TAKT supports Claude, Codex, OpenCode, Pi, the official DeepSeek Harness SDK, Cursor, Copilot, and Kiro providers. Claude/Codex/OpenCode use their SDK credentials, Pi uses the Pi SDK credential store or provider environment variables, DeepSeek Harness uses the official credential store (`$DSH_HOME/.credentials.yaml`, default `~/.dsh/.credentials.yaml`) or the `DEEPSEEK_API_KEY` environment variable, Kiro uses an API key, Cursor can use either API key or existing `cursor-agent login` session, and Copilot uses a GitHub token.
 
 The global configuration schema also retains API-key fields for some legacy or provider integrations that are not currently selectable as top-level providers. These fields do not activate a provider by themselves; use the authentication variables and keys documented for the selected provider below.
 
@@ -525,7 +525,7 @@ Environment variables take precedence over `config.yaml` settings.
 | Codex (OpenAI) | `TAKT_OPENAI_API_KEY` | `openai_api_key` |
 | OpenCode | `TAKT_OPENCODE_API_KEY` | `opencode_api_key` |
 | Pi | Pi SDK credential store or provider-native environment variables | - |
-| DeepSeek Harness | `DEEPSEEK_API_KEY` (optional `DEEPSEEK_BASE_URL`) | - |
+| DeepSeek Harness | Official store `$DSH_HOME/.credentials.yaml` (default `~/.dsh/.credentials.yaml`) or `DEEPSEEK_API_KEY` (optional `DEEPSEEK_BASE_URL`) | - |
 | Cursor Agent | `TAKT_CURSOR_API_KEY` | `cursor_api_key` |
 | GitHub Copilot CLI | `TAKT_COPILOT_GITHUB_TOKEN` | `copilot_github_token` |
 | Kiro CLI | `TAKT_KIRO_API_KEY` (`KIRO_API_KEY` fallback) | `kiro_api_key` |
@@ -1271,14 +1271,33 @@ The managed environment uses uv-managed CPython 3.12 and the matching SDK/runtim
 
 If package-index access was previously configured with `pip`, migrate to uv's standard `UV_INDEX_URL`, proxy, and certificate environment variables; `uv sync --locked` uses the distributed lock as the dependency source.
 
-The install `--python` option and provider `python_path` option were removed because only the managed interpreter is supported. Authentication remains environment-based: set `DEEPSEEK_API_KEY`, and optionally `DEEPSEEK_BASE_URL`; the API key is not written to workflow/config files or command arguments.
+The install `--python` option and provider `python_path` option were removed because only the managed interpreter is supported. The API key is not written to workflow/config files or command arguments. Authentication uses the official DeepSeek Harness credential store or the selected environment reference; see the credential section below.
+
+##### Credential store reuse
+
+> **Known issue:** with the pinned official runtime (`0.1.5rc1`), a credential echoed in an HTTP error body can appear in the runtime's notifications and remain in its saved session. TAKT-side redaction cannot remove data the runtime has already persisted. Use dummy credentials and a local mock for the regression test; do not run secret-echo probes with real keys.
+
+`deepseek-harness` resolves credentials from the official DeepSeek Harness credential store. TAKT never reads, parses, copies, or rewrites `.credentials.yaml`; it hands the official runtime the store path and the credential reference name, and the runtime resolves the value.
+
+- Credential store: `$DSH_HOME/.credentials.yaml`. When `DSH_HOME` is not set, the official default `~/.dsh/.credentials.yaml` is used.
+- An explicit `DSH_HOME` must be an absolute path without shell expansion. Empty, relative, `~`-prefixed, or control-character values fail before the bridge starts; TAKT does not expand shell syntax and does not silently fall back to `~/.dsh`.
+- The credential reference comes from `llm-deepseek.apiKeyEnv` in `$DSH_HOME/settings.yaml`. When the file, the section, or `apiKeyEnv` is absent, the official default `DEEPSEEK_API_KEY` is used. TAKT reads only this selector and `llm-deepseek.baseURL`; other settings, model catalogs, and generation parameters are not imported. Malformed documents, duplicate keys, custom tags, or invalid reference names fail before the bridge starts with a message that does not echo the document.
+- Precedence is native to the official runtime: an exported variable for the selected reference (for example `DEEPSEEK_API_KEY`) is passed to the runtime and takes precedence over the stored credential. Save a credential in the DeepSeek Harness Settings → Models page to omit the export, or export a variable for one-off overrides.
+- Only the selected reference is propagated. When `settings.yaml` selects a custom reference, TAKT does not pass or reuse an unselected `DEEPSEEK_API_KEY` for it.
+- Endpoint consistency: when `llm-deepseek.baseURL` is stored, it must match the effective endpoint after URL normalization of scheme, host, port, path, and query (a trailing slash is equivalent). A mismatch, a URL with userinfo, or a non-http(s) URL fails before any HTTP request, so a stored credential is never sent to a different endpoint. `provider_options.deepseek_harness.base_url`, `DEEPSEEK_BASE_URL`, and the public default keep their existing priority.
+- The credential source home is separate from TAKT's managed dsh-home: the bridge still runs with TAKT's managed home, so TAKT does not create credential files in `$DSH_HOME`, does not scan the managed home for an older store, and provides no migration or compatibility fallback (breaking change). A `.credentials.yaml` written by older TAKT versions inside the managed home is ignored.
+- Credential binding: the source home, reference, and endpoint are part of the bridge process identity. Changing them while a session is alive fails that turn explicitly and asks for a new run instead of silently resetting the conversation.
+- Store updates and deletions are delegated to the official runtime watcher; TAKT adds no separate watcher or credential cache. An updated value is used by later turns of the same session. Deletion is observed with a short delay: the official runtime may complete one more turn from its last-good value, and the turn that reports the missing credential sends no HTTP request.
+- **Warning:** malformed live updates are not revocation. With pinned `0.1.5rc1`, a running session continues using the last-good credential after a malformed YAML update, then adopts a valid repaired store on a later turn. Startup with malformed YAML fails instead. An already-sent request retains its original authorization while the store changes; updates apply only to subsequent requests after watcher reload. Do not rely on a corrupt file or a successful turn as proof of revocation or reload, and do not assume the next turn synchronously sees a write.
+- Diagnostics omit raw HTTP bodies and absolute credential paths and name the logical source (`DSH_HOME` or the default harness home) plus a repair step. Unclassified provider/transport failures withhold upstream messages and stderr tails rather than relying on partial redaction. Settings failures distinguish unreadable files, size limits, malformed YAML, invalid references and invalid stored endpoint types. End-to-end credential non-exposure is still limited by the known official runtime issue described above.
+- TAKT does not scan `.env` files. Credentials come from the store, the selected reference's environment variable, or the official runtime's own resolution.
 
 This provider is a developer-preview compatibility surface: use the opt-in live smoke only when you intentionally want to spend DeepSeek API quota; normal unit, integration, and mock E2E suites never call DeepSeek.
 
-Opt-in live smoke (supported Linux/macOS only):
+Opt-in live smoke (supported Linux/macOS only). The suite also runs a store-only Flash/Pro check when `$DSH_HOME/.credentials.yaml` (or `~/.dsh/.credentials.yaml`) exists and skips it otherwise:
 
 ```bash
-export DEEPSEEK_API_KEY=your-key
+export DEEPSEEK_API_KEY=your-key   # optional when a stored credential is available
 export TAKT_DEEPSEEK_HARNESS_LIVE=1
 npm run test:deepseek-harness:live
 ```
@@ -1502,8 +1521,9 @@ provider_options:
 - `no_extensions` disables extension discovery but still loads the sources listed in `extensions`.
 - The other `no_*` options disable discovery of their respective resource types.
 - Implicit project-local Pi resources are not trusted or loaded; only the absolute path discovered for an explicitly configured npm source can be reused from project package storage.
-- In `readonly` and `edit`, all tools registered by each explicitly configured extension are enabled together as one trust unit. Ambient auto-discovered extension tools are not enabled in these restrictive modes. A nonempty `allowedTools` continues to filter builtin tools, while `allowedTools: []` denies every tool, including explicit extension tools.
+- In `readonly` and `edit`, non-builtin tool names registered by each explicitly configured extension are enabled together as one trust unit. Ambient auto-discovered extension tools are not enabled in these restrictive modes. A nonempty `allowedTools` filters builtin names, including extension overrides of those names, while `allowedTools: []` denies every tool, including explicit extension tools. Lists containing only empty strings or whitespace-only entries are also treated as deny-all.
 - When permission mode is unset, an explicit `allowedTools` list is also subject to tool provenance verification. Auto-discovered extension tools are excluded even if listed in `allowedTools`; to enable an extension tool, explicitly configure its source in `extensions` and include its name in `allowedTools`. Configuring an extension does not add unlisted tools. Packages containing only skills, prompts, or themes still load without granting extension tools.
+- When an explicitly configured extension registers a builtin-name tool during its factory initialization, the extension implementation replaces the builtin, as in plain Pi. In `readonly` and `edit`, that name must pass both the mode's builtin permissions and `allowedTools` when supplied. With an unset permission mode and an explicit `allowedTools` list, or `full` with a readonly-only list, the name must be listed. For example, `readonly` + `['grep']` does not activate an extension's `read`, and `edit` + `['read']` does not activate its `bash`. Excluded names do not fall back to the replaced builtin. Ambient overrides remain excluded in these branches. Outside `full` mode, unverifiable provenance, including a builtin's owner changing later in `session_start`, still stops the Pi call.
 - Pi permission modes are active-tool allowlists, not operating-system sandboxes. A trusted explicit extension may run processes or modify files even when `permission_mode: readonly`. Explicit extension load failures and provenance verification failures stop the Pi call with an error.
 - Explicit extensions execute inside the TAKT process, so configure only trusted local paths and package sources.
 - Extension URLs containing embedded credentials or secret-bearing query parameters are rejected.

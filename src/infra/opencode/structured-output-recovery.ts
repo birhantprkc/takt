@@ -74,6 +74,23 @@ export function planStructuredOutputAttempt(
   return { sessionMode, structuredMode };
 }
 
+const NATIVE_FORMAT_PARAMETER_NAMES = ['tool_choice', 'response_format', 'json_schema'];
+const REQUEST_REJECTION_MARKERS = [
+  'invalid_request_error',
+  'badrequest',
+  'invalid parameter',
+  'not supported',
+  'does not support',
+];
+
+// "Unsupported parameter: '<name>'" names the single rejected parameter explicitly.
+// It takes precedence over the co-occurrence check below: when a message says which
+// parameter was rejected, that name — not the mere presence of a format-parameter
+// substring elsewhere in the message (e.g. in a "valid parameters" list) — decides
+// the verdict. Otherwise a message like "Unsupported parameter: 'seed'. Valid
+// parameters include ... response_format, tool_choice ..." would false-positive.
+const UNSUPPORTED_PARAMETER_PATTERN = /unsupported parameter:\s*['"`]?([\w.]+)/i;
+
 /**
  * native format の要求そのものが失敗したことを示すエラー文言の判定。
  * StructuredOutput ツールを一度も呼ばなかった場合と、ゲートウェイ/モデルが
@@ -85,14 +102,42 @@ export function isNativeStructuredOutputFailureMessage(message: string): boolean
 }
 
 /**
+ * プロバイダが format 由来のパラメータ（強制 tool_choice、response_format /
+ * json_schema）をリクエストごと拒否したことを示すエラー文言の判定。
+ * パラメータ名だけではファイルパスやツール名にも現れうるため、
+ * リクエスト拒否を示す文言が併記されている場合に限る。
+ * "Unsupported parameter: '<name>'" 形式は拒否対象そのものを明示するので、
+ * その判定を co-occurrence チェックより優先する: <name> が format パラメータで
+ * なければ、メッセージ中に response_format 等の文言が別の理由（有効なパラメータ
+ * 一覧など）で同居していても false を返す。
+ */
+export function isNativeFormatRejectionMessage(message: string): boolean {
+  const named = UNSUPPORTED_PARAMETER_PATTERN.exec(message)?.[1]?.toLowerCase();
+  if (named !== undefined) {
+    return NATIVE_FORMAT_PARAMETER_NAMES.includes(named);
+  }
+
+  const lower = message.toLowerCase();
+  return (
+    NATIVE_FORMAT_PARAMETER_NAMES.some((name) => lower.includes(name))
+    && REQUEST_REJECTION_MARKERS.some((marker) => lower.includes(marker))
+  );
+}
+
+/**
  * native → formatless への劣化を1回だけ許可するかどうか。
  * schema を要求していない step（plain）や、既に劣化済みの attempt では発火しない。
+ * ツールガード由来の失敗はファイルパスやツール名を文言に埋め込むため、
+ * プロバイダ拒否の判定には使わない。
  */
 export function shouldDegradeToFormatless(
   state: OpenCodeStructuredOutputRecoveryState,
   failureMessage: string,
+  fromToolGuard: boolean,
 ): boolean {
-  return state.hasOutputSchema && !state.nativeDegraded && isNativeStructuredOutputFailureMessage(failureMessage);
+  if (!state.hasOutputSchema || state.nativeDegraded) return false;
+  return isNativeStructuredOutputFailureMessage(failureMessage)
+    || (!fromToolGuard && isNativeFormatRejectionMessage(failureMessage));
 }
 
 export function degradeToFormatless(

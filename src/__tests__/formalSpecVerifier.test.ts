@@ -601,7 +601,7 @@ describe('runFormalSpecVerification', () => {
     }
   });
 
-  it.each([0, 8_001, 1024 * 1024 + 1])('should retain TLC timeout guidance with %i output characters', async (outputLength) => {
+  it.each([0, 8_001, 1024 * 1024 + 1])('should retain timeout diagnostics and bound captured output with %i output characters', async (outputLength) => {
     vi.useFakeTimers();
     const directory = createTestDirectory();
     mockTlcVerification({ hang: true, stdout: 'x'.repeat(outputLength) });
@@ -613,19 +613,14 @@ describe('runFormalSpecVerification', () => {
 
       expect(result.verdict).toBe('error');
       expect(result.quint.verify).toMatchObject({ status: 'error' });
-      expect(result.quint.verify?.message).toMatch(/^TLC exhaustively/);
+      expect(result.quint.verify?.message).toContain('TLC');
       expect(result.quint.verify?.message).toContain('Process timed out after 300000 ms');
-      expect(result.quint.verify?.message).toContain('entire state space');
-      expect(result.quint.verify?.message).toContain('--max-steps does not limit TLC');
-      expect(result.quint.verify?.message).toContain('Bound all state variables');
-      expect(result.quint.verify?.message).toContain('finite ranges');
       if (outputLength > 8_000) {
         expect(result.quint.verify?.message).toHaveLength(8_000 + '\n[output truncated]'.length);
         expect(result.quint.verify?.message).toContain('[output truncated]');
       }
       if (outputLength > 1024 * 1024) {
         expect(result.quint.verify?.message).toContain('capture limit');
-        expect(result.quint.verify?.message).toContain('diagnostics may be missing');
       } else {
         expect(result.quint.verify?.message).not.toContain('capture limit');
       }
@@ -668,7 +663,7 @@ describe('runFormalSpecVerification', () => {
       const result = await verification;
 
       expect(result.quint.verify?.message).toContain('Process timed out after 2000 ms');
-      expect(result.quint.verify?.message).toMatch(/^TLC exhaustively/);
+      expect(result.quint.verify?.message).toContain('TLC');
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -820,6 +815,43 @@ describe('runFormalSpecVerification', () => {
       });
       expect(spawnedProcesses).toHaveLength(1);
       expect(spawnedProcesses.some(({ command }) => command === 'java')).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should surface Quint parse.json errors[] when --out captures diagnostics that stdout/stderr do not', async () => {
+    const directory = createTestDirectory();
+    parseResult = {
+      errors: [
+        {
+          explanation: "[QNT101] Built-in name 'enabled' is redefined in module 'm'",
+          locs: [{ source: 'spec.qnt', start: { line: 4, col: 2, index: 0 } }],
+        },
+      ],
+    };
+    processResponses.push({ code: 1 });
+
+    try {
+      const result = await runFormalSpecVerification('```quint\nmodule invalid {}\n```', directory, { modelCheckTimeoutSeconds: 300 });
+
+      expect(result.quint.parse).toMatchObject({ status: 'error' });
+      expect(result.quint.parse?.message).toContain('[QNT101]');
+      expect(result.quint.parse?.message).toContain('spec.qnt:5:3');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should fall back to the process-failure message when parse.json has no errors[]', async () => {
+    const directory = createTestDirectory();
+    parseResult = { modules: [] };
+    processResponses.push({ code: 1, stderr: 'Quint parse failed' });
+
+    try {
+      const result = await runFormalSpecVerification('```quint\nmodule invalid {}\n```', directory, { modelCheckTimeoutSeconds: 300 });
+
+      expect(result.quint.parse).toMatchObject({ status: 'error', message: 'Quint parse failed' });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

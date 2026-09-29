@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { createInterface, type Interface } from 'node:readline';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
@@ -39,11 +40,27 @@ import type {
   DeepSeekHarnessProviderOptions,
   DeepSeekReasoningEffort,
 } from '../../core/models/workflow-types.js';
-import { DEEPSEEK_HARNESS_DEFAULT_MODEL } from './constants.js';
+import { DEEPSEEK_HARNESS_DEFAULT_CREDENTIAL_REFERENCE, DEEPSEEK_HARNESS_DEFAULT_MODEL } from './constants.js';
 import { getDeepSeekHarnessManagedPaths } from './managed-venv.js';
 import { assertSupportedDeepSeekHarnessPlatform } from './platform.js';
 import { validateDeepSeekHarnessRuntime } from './runtime.js';
 import { parseDeepSeekHarnessModelReference } from './model-reference.js';
+import { type DeepSeekCredentialHomeOrigin } from './credential-home.js';
+import { resolveConfiguredDeepSeekEndpoint } from './endpoint-consistency.js';
+import {
+  resolveDeepSeekCredentialBinding,
+  type DeepSeekCredentialBinding,
+} from './credential-binding.js';
+import {
+  createDeepSeekCredentialPatch,
+  type DeepSeekCredentialPatch,
+} from './credential-patch.js';
+import {
+  buildCredentialDiagnostic,
+  classifyDeepSeekRuntimeCredentialFailure,
+  DeepSeekCredentialDiagnosticError,
+  type DeepSeekCredentialFailureClassification,
+} from './credential-diagnostics.js';
 import {
   abortError,
   createSessionDispatchQueue,
@@ -172,6 +189,11 @@ interface ResolvedBridgeConfiguration {
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
   reasoningEffort?: DeepSeekReasoningEffort;
+}
+
+interface CredentialFailureContext {
+  sourceHomeOrigin?: DeepSeekCredentialHomeOrigin;
+  reference?: string;
 }
 
 interface ProcessEnvironmentResolution {
@@ -319,52 +341,31 @@ function resolveBridgeConfiguration(
   };
 }
 
-function resolveUrlUserinfoSecrets(baseUrl: string | undefined): readonly string[] {
-  if (baseUrl === undefined) {
-    return [];
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl);
-  } catch (error) {
-    throw new Error('DeepSeek Harness baseUrl must be a valid URL', { cause: error });
-  }
-  const encodedValues = [parsed.username, parsed.password].filter((value) => value.length > 0);
-  return [...new Set(encodedValues.flatMap((value) => {
-    const decoded = decodeURIComponent(value);
-    return decoded === value ? [value] : [value, decoded];
-  }))];
-}
-
-interface ConfiguredDeepSeekSecrets {
-  apiKey: string | undefined;
+interface ConfiguredDeepSeekCredential {
+  referenceValue: string | undefined;
   baseUrl: string | undefined;
 }
 
-function resolveConfiguredDeepSeekSecrets(
+function resolveConfiguredDeepSeekCredential(
   providerOptions: DeepSeekHarnessProviderOptions | undefined,
   childProcessEnv: Readonly<Record<string, string>> | undefined,
-): ConfiguredDeepSeekSecrets {
+  reference: string,
+): ConfiguredDeepSeekCredential {
   return {
-    apiKey: childProcessEnv?.DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY,
-    baseUrl: providerOptions?.baseUrl
-      ?? childProcessEnv?.DEEPSEEK_BASE_URL
-      ?? process.env.DEEPSEEK_BASE_URL,
+    referenceValue: childProcessEnv?.[reference] ?? process.env[reference],
+    baseUrl: resolveConfiguredDeepSeekEndpoint({ providerOptions, childProcessEnv, ambientEnv: process.env }),
   };
 }
 
 function resolveKnownSecrets(
   providerOptions: DeepSeekHarnessProviderOptions | undefined,
   childProcessEnv: Readonly<Record<string, string>> | undefined,
+  reference: string,
 ): Record<string, string> {
-  const configured = resolveConfiguredDeepSeekSecrets(providerOptions, childProcessEnv);
-  const urlUserinfoSecrets = resolveUrlUserinfoSecrets(configured.baseUrl);
+  const configured = resolveConfiguredDeepSeekCredential(providerOptions, childProcessEnv, reference);
   return {
-    ...(configured.apiKey === undefined ? {} : { DEEPSEEK_API_KEY: configured.apiKey }),
+    ...(configured.referenceValue === undefined ? {} : { [reference]: configured.referenceValue }),
     ...(configured.baseUrl === undefined ? {} : { DEEPSEEK_BASE_URL: configured.baseUrl }),
-    ...Object.fromEntries(
-      urlUserinfoSecrets.map((value, index) => [`DEEPSEEK_URL_CREDENTIAL_${index}`, value]),
-    ),
   };
 }
 
@@ -374,9 +375,15 @@ function resolveKnownSecretsForFailure(
   providerOptions: DeepSeekHarnessProviderOptions | undefined,
   childProcessEnv: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> {
-  const configured = resolveConfiguredDeepSeekSecrets(providerOptions, childProcessEnv);
+  const configured = resolveConfiguredDeepSeekCredential(
+    providerOptions,
+    childProcessEnv,
+    DEEPSEEK_HARNESS_DEFAULT_CREDENTIAL_REFERENCE,
+  );
   return {
-    ...(configured.apiKey === undefined ? {} : { DEEPSEEK_API_KEY: configured.apiKey }),
+    ...(configured.referenceValue === undefined
+      ? {}
+      : { [DEEPSEEK_HARNESS_DEFAULT_CREDENTIAL_REFERENCE]: configured.referenceValue }),
     ...(configured.baseUrl === undefined ? {} : { DEEPSEEK_BASE_URL: configured.baseUrl }),
   };
 }
@@ -401,6 +408,7 @@ function resolveProcessEnvironment(
   providerOptions: DeepSeekHarnessProviderOptions | undefined,
   childProcessEnv: Readonly<Record<string, string>> | undefined,
   dshHomeDir: string,
+  credentialReference: string,
 ): ProcessEnvironmentResolution {
   const env: NodeJS.ProcessEnv = {};
   for (const name of DEEPSEEK_HARNESS_RUNTIME_ENV_NAMES) {
@@ -411,15 +419,15 @@ function resolveProcessEnvironment(
   }
   Object.assign(env, pickNestedObservabilityEnv(childProcessEnv ?? getAmbientEnvironment()));
 
-  const apiKey = childProcessEnv?.DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY;
-  const configuredBaseUrl = providerOptions?.baseUrl
-    ?? childProcessEnv?.DEEPSEEK_BASE_URL
-    ?? process.env.DEEPSEEK_BASE_URL;
-  if (apiKey !== undefined) {
-    env.DEEPSEEK_API_KEY = apiKey;
-  }
+  // Only the selected reference is propagated: an unselected credential variable must
+  // never stand in for the reference the settings selector chose.
+  const referenceValue = childProcessEnv?.[credentialReference] ?? process.env[credentialReference];
+  const configuredBaseUrl = resolveConfiguredDeepSeekEndpoint({ providerOptions, childProcessEnv, ambientEnv: process.env });
   if (configuredBaseUrl !== undefined) {
     env.DEEPSEEK_BASE_URL = configuredBaseUrl;
+  }
+  if (referenceValue !== undefined) {
+    env[credentialReference] = referenceValue;
   }
   env.DSH_HOME = dshHomeDir;
   if (providerOptions?.runtimeMode !== undefined) {
@@ -427,7 +435,7 @@ function resolveProcessEnvironment(
   }
   return {
     env,
-    knownSecrets: resolveKnownSecrets(providerOptions, childProcessEnv),
+    knownSecrets: resolveKnownSecrets(providerOptions, childProcessEnv, credentialReference),
     nestedObservabilityFingerprint: getProcessNestedObservabilityFingerprint(childProcessEnv),
   };
 }
@@ -455,6 +463,7 @@ function processKey(
   configuration: ResolvedBridgeConfiguration,
   providerOptions: DeepSeekHarnessProviderOptions | undefined,
   environment: ProcessEnvironmentResolution,
+  binding: DeepSeekCredentialBinding,
   includeReasoningEffort = true,
 ): string {
   const secretFingerprint = createHash('sha256')
@@ -472,6 +481,7 @@ function processKey(
     configuration: keyConfiguration,
     providerOptions: stableValue(nonSecretProviderOptions),
     secretFingerprint,
+    credentialFingerprint: binding.fingerprint,
     nestedObservabilityFingerprint: environment.nestedObservabilityFingerprint,
   });
 }
@@ -1063,6 +1073,7 @@ class DeepSeekHarnessProcess {
     private readonly managedEnvironmentDir: string,
     private readonly pythonPath: string,
     private readonly environment: ProcessEnvironmentResolution,
+    private readonly credentialPatch: DeepSeekCredentialPatch,
   ) {}
 
   get isClosed(): boolean {
@@ -1172,7 +1183,7 @@ class DeepSeekHarnessProcess {
           type: 'start',
           protocolVersion: DEEPSEEK_HARNESS_BRIDGE_PROTOCOL_VERSION,
           id: this.nextRequestId(),
-          config: this.configuration,
+          config: { ...this.configuration, patches: [this.credentialPatch.path] },
         },
         undefined,
         this.configuration.requestTimeoutMs < DEEPSEEK_HARNESS_STARTUP_TIMEOUT_MS
@@ -1590,13 +1601,32 @@ class DeepSeekHarnessProcess {
     const managed = this.managed;
     this.managed = undefined;
     this.child = undefined;
-    if (managed === undefined) {
-      return;
-    }
     try {
-      await managed.terminate();
+      if (managed !== undefined) {
+        try {
+          await managed.terminate();
+        } catch {
+          await managed.wait().catch(() => undefined);
+        }
+      }
+    } finally {
+      await this.disposeCredentialPatch();
+    }
+  }
+
+  private async disposeCredentialPatch(): Promise<void> {
+    try {
+      await this.credentialPatch.dispose();
     } catch {
-      await managed.wait().catch(() => undefined);
+      // Cleanup of a non-secret temporary patch must not mask bridge termination.
+    }
+  }
+
+  disposeCredentialPatchForExit(): void {
+    try {
+      this.credentialPatch.disposeSync();
+    } catch {
+      // The exit hook cannot report cleanup failures.
     }
   }
 
@@ -1621,6 +1651,7 @@ class DeepSeekHarnessProcess {
 interface SessionBinding {
   identity: string;
   processKey: string;
+  credentialFingerprint: string;
 }
 
 const processes = new Map<string, DeepSeekHarnessProcess>();
@@ -1635,6 +1666,7 @@ function registerExitCleanup(): void {
   }
   process.once('exit', () => {
     for (const processRecord of processes.values()) {
+      processRecord.disposeCredentialPatchForExit();
       processRecord.killForExit();
     }
   });
@@ -1655,6 +1687,7 @@ function registerProcessBindings(
   sessionId: string | undefined,
   identity: string,
   processKeyValue: string,
+  credentialFingerprint: string,
 ): void {
   if (sessionId !== undefined) {
     const existingSession = sessionBindings.get(sessionId);
@@ -1666,7 +1699,7 @@ function registerProcessBindings(
   }
 
   if (sessionId !== undefined) {
-    sessionBindings.set(sessionId, { identity, processKey: processKeyValue });
+    sessionBindings.set(sessionId, { identity, processKey: processKeyValue, credentialFingerprint });
   }
 }
 
@@ -1674,19 +1707,31 @@ function registerProcessBindings(
  * Reuse a session-local bridge, or replace its idle process when only effort changed.
  * Reject incompatible session identities; unbound calls always get distinct one-shot keys.
  */
-async function getOrCreateProcess(options: DeepSeekHarnessCallOptions): Promise<DeepSeekHarnessProcess> {
+async function getOrCreateProcess(
+  options: DeepSeekHarnessCallOptions,
+  credentialFailureContext: CredentialFailureContext,
+): Promise<DeepSeekHarnessProcess> {
   assertSupportedDeepSeekHarnessPlatform();
   const providerOptions = options.providerOptions;
   const configuration = resolveBridgeConfiguration(options, providerOptions);
+  const binding = await resolveDeepSeekCredentialBinding({
+    childProcessEnv: options.childProcessEnv,
+    ambientEnv: getAmbientEnvironment(),
+    userHome: os.homedir(),
+    providerOptions,
+  });
+  credentialFailureContext.sourceHomeOrigin = binding.home.origin;
+  credentialFailureContext.reference = binding.ref;
   const managedPaths = getDeepSeekHarnessManagedPaths();
   const environment = resolveProcessEnvironment(
     providerOptions,
     options.childProcessEnv,
     managedPaths.dshHomeDir,
+    binding.ref,
   );
   assertOpaqueSessionId(options.sessionId, environment.knownSecrets);
-  const baseKey = processKey(configuration, providerOptions, environment);
-  const sessionIdentity = processKey(configuration, providerOptions, environment, false);
+  const baseKey = processKey(configuration, providerOptions, environment, binding);
+  const sessionIdentity = processKey(configuration, providerOptions, environment, binding, false);
   const key = options.sessionId === undefined
     ? `${baseKey}:one-shot:${++oneShotProcessSequence}`
     : `${baseKey}:session:${JSON.stringify(options.sessionId)}`;
@@ -1700,6 +1745,13 @@ async function getOrCreateProcess(options: DeepSeekHarnessCallOptions): Promise<
     }
     const existingBinding = sessionBindings.get(options.sessionId);
     if (existingBinding !== undefined && existingBinding.processKey !== key) {
+      if (existingBinding.credentialFingerprint !== binding.fingerprint) {
+        throw new DeepSeekCredentialDiagnosticError(
+          'binding-changed',
+          'DeepSeek Harness credential binding changed during this session; start a new run or session',
+          { sourceHomeOrigin: binding.home.origin, reference: binding.ref },
+        );
+      }
       if (existingBinding.identity !== sessionIdentity) {
         throw new Error(
           'DeepSeek Harness sessionId is already bound to a different project or bridge configuration',
@@ -1713,40 +1765,51 @@ async function getOrCreateProcess(options: DeepSeekHarnessCallOptions): Promise<
       }
     }
   }
-  const processRecord = new DeepSeekHarnessProcess(
-    configuration,
-    managedPaths.environmentDir,
-    managedPaths.pythonPath,
-    environment,
-  );
-  processes.set(key, processRecord);
+  const credentialPatch = await createDeepSeekCredentialPatch(binding);
+  let processRecord: DeepSeekHarnessProcess | undefined;
   try {
-    registerProcessBindings(options.sessionId, sessionIdentity, key);
+    processRecord = new DeepSeekHarnessProcess(
+      configuration,
+      managedPaths.environmentDir,
+      managedPaths.pythonPath,
+      environment,
+      credentialPatch,
+    );
+    processes.set(key, processRecord);
+    registerProcessBindings(options.sessionId, sessionIdentity, key, binding.fingerprint);
   } catch (error) {
-    removeProcess(processRecord);
+    if (processRecord !== undefined) {
+      removeProcess(processRecord);
+    }
+    await credentialPatch.dispose().catch(() => undefined);
     throw error;
   }
   registerExitCleanup();
   return processRecord;
 }
 
-function formatProviderBridgeFailure(
-  error: Error,
-  options: DeepSeekHarnessCallOptions,
-  knownSecrets: Record<string, string>,
-): AgentFailureDetail {
-  const modelReference = options.model ?? DEEPSEEK_HARNESS_DEFAULT_MODEL;
-  const reason = `DeepSeek Harness model reference ${JSON.stringify(modelReference)} `
-    + `failed at the provider bridge/SDK: ${getErrorMessage(error)}`;
-  return createProviderErrorFailure(
-    safeMessage(reason, knownSecrets),
-  );
+function credentialDiagnosticDetail(
+  classification: DeepSeekCredentialFailureClassification,
+  errorContext: { sourceHomeOrigin?: DeepSeekCredentialHomeOrigin; reference?: string },
+  failureContext: CredentialFailureContext,
+): AgentFailureDetail | undefined {
+  const sourceHomeOrigin = errorContext.sourceHomeOrigin ?? failureContext.sourceHomeOrigin;
+  if (sourceHomeOrigin === undefined) {
+    return undefined;
+  }
+  const reference = errorContext.reference ?? failureContext.reference;
+  return createProviderErrorFailure(buildCredentialDiagnostic({
+    classification,
+    sourceHomeOrigin,
+    reference,
+  }));
 }
 
 function failureDetail(
   error: unknown,
   options: DeepSeekHarnessCallOptions,
   knownSecrets: Record<string, string>,
+  credentialFailureContext: CredentialFailureContext = {},
 ): AgentFailureDetail {
   if (options.abortSignal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
     const detail = classifyAbortSignalReason(options.abortSignal?.reason ?? error);
@@ -1761,8 +1824,28 @@ function failureDetail(
   if (error instanceof DeepSeekHarnessProtocolError) {
     return createProviderStreamParseFailure(safeMessage(error, knownSecrets));
   }
+  if (error instanceof DeepSeekCredentialDiagnosticError) {
+    const diagnostic = credentialDiagnosticDetail(
+      error.classification,
+      { sourceHomeOrigin: error.sourceHomeOrigin, reference: error.reference },
+      credentialFailureContext,
+    );
+    if (diagnostic !== undefined) {
+      return diagnostic;
+    }
+  }
   if (error instanceof DeepSeekHarnessTransportError || error instanceof DeepSeekHarnessProviderError) {
-    return formatProviderBridgeFailure(error, options, knownSecrets);
+    const classification = classifyDeepSeekRuntimeCredentialFailure(getErrorMessage(error));
+    if (classification !== 'unknown') {
+      const diagnostic = credentialDiagnosticDetail(classification, {}, credentialFailureContext);
+      if (diagnostic !== undefined) {
+        return diagnostic;
+      }
+    }
+    // Store-only values are deliberately unknown to TAKT. Never expose an
+    // unclassified upstream message or stderr tail based on partial redaction.
+    return credentialDiagnosticDetail('runtime-failure', {}, credentialFailureContext)
+      ?? createProviderErrorFailure('DeepSeek Harness runtime failed; verify credentials and endpoint, then retry.');
   }
   const reason = safeMessage(error, knownSecrets);
   return createProviderErrorFailure(reason);
@@ -1885,6 +1968,7 @@ export async function callDeepSeekHarness(
   };
   let processRecord: DeepSeekHarnessProcess | undefined;
   const requestedSessionId = turnOptions.sessionId;
+  const credentialFailureContext: CredentialFailureContext = {};
   const state: HarnessStreamState = {
     initializedSessions: new Set(),
     sawSessionEvent: false,
@@ -1901,7 +1985,7 @@ export async function callDeepSeekHarness(
   };
   try {
     const run = async (): Promise<AgentResponse> => {
-      const currentProcess = await getOrCreateProcess(turnOptions);
+      const currentProcess = await getOrCreateProcess(turnOptions, credentialFailureContext);
       processRecord = currentProcess;
       try {
         const result = await currentProcess.run(
@@ -1946,7 +2030,7 @@ export async function callDeepSeekHarness(
     const knownSecrets = processRecord?.knownSecrets
       ?? resolveKnownSecretsForFailure(turnOptions.providerOptions, turnOptions.childProcessEnv);
     flushHarnessResponseRedactor(state, turnOptions.onStream, knownSecrets, true);
-    const detail = failureDetail(error, turnOptions, knownSecrets);
+    const detail = failureDetail(error, turnOptions, knownSecrets, credentialFailureContext);
     const content = formatAgentFailure(detail);
     const responseStatus = error instanceof DeepSeekHarnessTurnEndError
       ? error.responseStatus

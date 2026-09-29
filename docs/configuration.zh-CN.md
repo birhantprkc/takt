@@ -92,7 +92,7 @@ assistant:
 #     default_permission_mode: edit
 
 # API key 配置（可选）
-# 可由 TAKT_ANTHROPIC_API_KEY / TAKT_OPENAI_API_KEY / TAKT_OPENCODE_API_KEY / TAKT_CURSOR_API_KEY / TAKT_COPILOT_GITHUB_TOKEN / TAKT_KIRO_API_KEY 覆盖。DeepSeek Harness 使用官方 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 环境变量，而不是 YAML API key 字段。
+# 可由 TAKT_ANTHROPIC_API_KEY / TAKT_OPENAI_API_KEY / TAKT_OPENCODE_API_KEY / TAKT_CURSOR_API_KEY / TAKT_COPILOT_GITHUB_TOKEN / TAKT_KIRO_API_KEY 覆盖。DeepSeek Harness 使用官方 credential store（$DSH_HOME/.credentials.yaml，默认 ~/.dsh/.credentials.yaml）或 DEEPSEEK_API_KEY，可选 DEEPSEEK_BASE_URL，而不是 YAML API key 字段。
 # anthropic_api_key: sk-ant-...  # Claude（Anthropic）
 # openai_api_key: sk-...         # Codex（OpenAI）
 # opencode_api_key: ...          # OpenCode
@@ -422,7 +422,7 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 
 ## API Key 配置
 
-TAKT 支持 Claude、Codex、OpenCode、Pi、官方 DeepSeek Harness SDK、Cursor、Copilot 和 Kiro provider。Claude/Codex/OpenCode 使用各自 SDK credential，Pi 使用 Pi SDK credential store 或 provider 原生环境变量，DeepSeek Harness 使用 `takt deepseek-harness install` 准备的 uv-managed environment 和官方 `DEEPSEEK_API_KEY`，Cursor 支持 API key 或已有 `cursor-agent login` session，Copilot 使用 GitHub token，Kiro 使用 API key。
+TAKT 支持 Claude、Codex、OpenCode、Pi、官方 DeepSeek Harness SDK、Cursor、Copilot 和 Kiro provider。Claude/Codex/OpenCode 使用各自 SDK credential，Pi 使用 Pi SDK credential store 或 provider 原生环境变量，DeepSeek Harness 使用 `takt deepseek-harness install` 准备的 uv-managed environment，通过官方 credential store（`$DSH_HOME/.credentials.yaml`，默认 `~/.dsh/.credentials.yaml`）或 `DEEPSEEK_API_KEY` 认证，Cursor 支持 API key 或已有 `cursor-agent login` session，Copilot 使用 GitHub token，Kiro 使用 API key。
 
 全局配置 schema 还保留了一些当前不能作为顶层 provider 选择的 legacy 或 provider integration API key 字段。这些字段本身不会启用 provider；请根据所选 provider，使用下文记录的认证环境变量或配置 key。
 
@@ -442,7 +442,7 @@ export TAKT_OPENCODE_API_KEY=...
 # 使用 Pi SDK credential store 或 provider 原生环境变量
 
 # 官方 DeepSeek Harness SDK（uv-managed CPython 3.12）
-export DEEPSEEK_API_KEY=...
+export DEEPSEEK_API_KEY=...  # 使用保存的 credential 时可省略
 # 可选：export DEEPSEEK_BASE_URL=https://...
 
 # Cursor Agent（如果已有 cursor-agent login session，则可选）
@@ -477,7 +477,7 @@ kiro_api_key: ...              # Kiro CLI
 | Codex（OpenAI） | `TAKT_OPENAI_API_KEY` | `openai_api_key` |
 | OpenCode | `TAKT_OPENCODE_API_KEY` | `opencode_api_key` |
 | Pi | Pi SDK credential store 或 provider 原生环境变量 | - |
-| DeepSeek Harness | `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`） | - |
+| DeepSeek Harness | 官方 store `$DSH_HOME/.credentials.yaml`（默认 `~/.dsh/.credentials.yaml`）或 `DEEPSEEK_API_KEY`（可选 `DEEPSEEK_BASE_URL`） | - |
 | Cursor Agent | `TAKT_CURSOR_API_KEY` | `cursor_api_key` |
 | GitHub Copilot CLI | `TAKT_COPILOT_GITHUB_TOKEN` | `copilot_github_token` |
 | Kiro CLI | `TAKT_KIRO_API_KEY`（`KIRO_API_KEY` fallback） | `kiro_api_key` |
@@ -919,9 +919,30 @@ managed environment 使用 uv-managed CPython 3.12，以及同捆 `pyproject.tom
 
 如果之前通过 `pip` 配置 package index，请迁移到 uv 标准的 `UV_INDEX_URL`、proxy 和 certificate 环境变量；`uv sync --locked` 将同捆 lock 作为依赖来源。
 
-install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，因为只支持 managed interpreter。认证使用环境变量 `DEEPSEEK_API_KEY`，可选 `DEEPSEEK_BASE_URL`；API key 不会写入 workflow/config 或命令参数。
+install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，因为只支持 managed interpreter。认证使用官方 DeepSeek Harness credential store 或所选参照对应的环境变量，可选 `DEEPSEEK_BASE_URL`；API key 不会写入 workflow/config 或命令参数。
+
+##### 复用 credential store
+
+> **已知问题：** 固定版官方 SDK/runtime `0.1.5rc1` 可能将 HTTP 错误中反射的 credential 写入 SDK 通知和保存的 session。TAKT 的输出脱敏无法删除 runtime 已保存的数据。回归测试只能使用 dummy credential 和本地 mock，不要用真实 API key 进行错误反射测试。
+
+`deepseek-harness` 通过官方 runtime 解析保存的 credential。TAKT 不读取、解析、复制或改写 `.credentials.yaml` 的 secret 内容，只向 runtime 传递 store 路径和参照名。
+
+- store 路径为 `$DSH_HOME/.credentials.yaml`。未设置 `DSH_HOME` 时使用官方默认路径 `~/.dsh/.credentials.yaml`。
+- 显式 `DSH_HOME` 必须是不需要 shell 展开的绝对路径。空值、相对路径、以 `~` 开头或包含控制字符的值会在 bridge 启动前失败；TAKT 不展开 shell 语法，也不会静默回退到 `~/.dsh`。
+- credential 参照取自 `$DSH_HOME/settings.yaml` 的 `llm-deepseek.apiKeyEnv`。文件、对应节或该字段缺失时使用官方默认值 `DEEPSEEK_API_KEY`。TAKT 只读取此参照和 `llm-deepseek.baseURL`，不导入其他设置、model catalog 或生成参数。不合法的文档、重复 key、自定义 tag 或不合法的参照名会在 bridge 启动前失败，错误不回显文档内容。
+- 优先级遵循官方 runtime：所选参照对应的环境变量优先于 store 内的 credential。在 DeepSeek Harness 的 Settings → Models 页面保存 credential 后即可省略 export；临时覆盖时可导出对应变量。
+- 只传递所选参照。`settings.yaml` 选择自定义参照时，TAKT 不会传递或使用未被选中的 `DEEPSEEK_API_KEY` 作为替代。
+- endpoint 一致性：保存了 `llm-deepseek.baseURL` 时，它必须与实际使用的 endpoint 一致。比较时规范化 URL 的 scheme、host、port 和尾部斜杠，并保留 path、query 和 fragment 的差异。不一致、包含 userinfo 或非 http(s) URL 会在 HTTP 请求之前被拒绝。`provider_options.deepseek_harness.base_url`、`DEEPSEEK_BASE_URL`、公开默认 endpoint 的既有优先级不变。
+- **破坏性变更：** credential source home 与 TAKT-managed dsh-home 分离。bridge 仍在 managed home 中运行；TAKT 不在 source home 创建 credential 文件，不再搜索 managed home 内的旧 store，也不提供自动迁移或兼容 fallback。旧版本在 managed home 内保存的 `.credentials.yaml` 被忽略，不会被删除或改写。
+- credential binding 由 source home、参照名和 endpoint 组成。session 存续期间改变其中任一项时，该 turn 会明确失败并提示启动新的 run，而不是静默重置会话。
+- store 更新和删除交给官方 runtime watcher；TAKT 不添加独立 watcher 或 credential cache。更新会在同一 session 的后续 turn 生效。删除的检测存在短暂延迟，runtime 可能用上次有效值再完成一个 turn；报告 credential 缺失的 turn 不会发送 HTTP 请求。
+- **注意：** 运行期间把 store 改成不合法 YAML 并不等于撤销 credential。固定版 `0.1.5rc1` 的已有 session 会继续使用上次有效值，修复文件后才在后续 turn 加载新值；启动时遇到不合法 YAML 则失败。已经发送的请求保留开始时的 Authorization，更新只影响 watcher reload 后的请求。不要把文件损坏或某个 turn 成功视为撤销或 reload 完成的证据，也不要假设写入后的下一 turn 会同步读取新值。
+- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved，不会假称已选择默认参照。未分类的 provider/transport 失败不展示上游 message 或 stderr tail；settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
+- TAKT 不扫描 `.env` 文件。credential 来自 store、所选参照对应的环境变量或官方 runtime 自身的解析路径。
 
 DeepSeek Harness provider 目前处于 developer preview 阶段。只有在明确接受会消耗 DeepSeek API quota 的情况下，才应运行下面的 live smoke。
+
+live smoke 仅支持对应的 Linux/macOS 平台。完整 suite 中的打包 CLI 测试要求 `DEEPSEEK_API_KEY`；存在 `$DSH_HOME/.credentials.yaml`（或默认 `~/.dsh/.credentials.yaml`）时，还会运行不使用该环境变量的 store-only Flash/Pro 测试，否则跳过该测试。
 
 ```bash
 export DEEPSEEK_API_KEY=your-key
@@ -1090,9 +1111,11 @@ provider_options:
 
 没有版本限定的显式 npm source 会依次复用已有的 project scope、user scope 安装；两者都无法解析为启用的资源时，才使用 temporary resolution，并且不会向持久 scope 安装。带版本限定的 npm source 始终使用 temporary resolution。显式资源不会写入 Pi 设置；隐式 project-local Pi 资源不会被信任或加载，只有为显式 npm source 检测到的绝对路径可以从 project package storage 复用。带有内嵌凭据或包含 secret 的 query 参数的 extension URL 会被拒绝。
 
-在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的所有 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 仍然只过滤 builtin tool，而 `allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
+在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的非 builtin 名称的 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 过滤 builtin 名称，也适用于同名的 extension 版本；`allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。仅包含空字符串或空白项的列表也按 deny-all 处理。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
 
 未指定 permission mode 时，显式 `allowedTools` 列表也会经过 tool 来源验证。自动发现的 extension tool 即使列在 `allowedTools` 中也会被排除；要启用 extension tool，必须在 `extensions` 中明确配置其来源，并在 `allowedTools` 中列出 tool 名称。配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
+
+当显式配置的 extension 在 factory 初始化时注册与 builtin 同名的 tool，extension 版本会像普通 Pi 一样替换 builtin。在 `readonly` 和 `edit` 中，该名称必须符合 mode 的 builtin 权限；如果指定了 `allowedTools`，还必须包含在列表中。未指定 permission mode 且显式指定 `allowedTools`，或 `full` 且列表仅包含 readonly tool 时，该名称也必须在列表中。例如，`readonly` + `['grep']` 不会启用 extension 的 `read`，`edit` + `['read']` 不会启用其 `bash`。被排除的名称不会回退到原来的 builtin。这些分支仍然排除 ambient 覆盖。在 `full` 以外的模式中，无法验证 provenance 时会停止 Pi call，包括在 `session_start` 中才更改 builtin 注册来源的情况。
 
 <a id="workflow-categories"></a>
 
