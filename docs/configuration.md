@@ -518,7 +518,7 @@ Environment variables take precedence over `config.yaml` settings.
 - Consider using environment variables instead.
 - Add `~/.takt/config.yaml` to your global `.gitignore` if needed.
 - Cursor provider can run without API key when `cursor-agent login` is already configured.
-- If you set credentials, installing the corresponding CLI tool (Claude Code, Codex, OpenCode, Pi) is not necessary. TAKT directly calls the respective API. DeepSeek Harness additionally requires its uv-managed environment (`takt deepseek-harness install`) and Linux x64/arm64 with glibc `>= 2.28` or macOS arm64 `>= 14.0`; Windows, macOS x64, Linux musl, older Linux glibc, and older macOS are unsupported. A system Python installation is not required.
+- If you set credentials, installing the corresponding CLI tool (Claude SDK, Codex, Pi) is not necessary. TAKT directly calls the respective API. DeepSeek Harness additionally requires its uv-managed environment (`takt deepseek-harness install`) and Linux x64/arm64 with glibc `>= 2.28` or macOS arm64 `>= 14.0`; Windows, macOS x64, Linux musl, older Linux glibc, and older macOS are unsupported. A system Python installation is not required.
 - The DeepSeek API key is passed only to the Python bridge environment, never to command arguments or workflow-generated config.
 - Copilot provider requires the `copilot` CLI to be installed. The GitHub token is used for authentication.
 - Kiro provider requires the `kiro-cli` CLI to be installed. `TAKT_KIRO_API_KEY` / `kiro_api_key` is passed to the child process as `KIRO_API_KEY`; if neither is set, TAKT uses the official `KIRO_API_KEY` environment variable.
@@ -586,6 +586,27 @@ Workflow `promotion` entries only advance the target ladder selected in
 `runtime.yaml`; they cannot contain provider, model, provider-options, or
 condition fields. `capabilities` remains the workflow-level way to request
 tool, network, sandbox, or skill abilities without choosing the runtime.
+
+### OpenCode v1/v2 selection
+
+The OpenCode provider starts the external `opencode serve` CLI and connects to its private server through an SDK. An API key alone is insufficient. The default uses a v1 CLI with `@opencode-ai/sdk` 1.18.28; v2 uses `@opencode/client` 2.0.18. Tested CLIs are v1 1.18.2 and v2 2.0.18. TAKT rejects a CLI whose major version differs from the selected transport before starting a server. OpenCode v2 replaces the same `opencode` command, so TAKT never automatically switches generations or updates your CLI.
+
+```sh
+# Install v2 separately, preserving your existing CLI
+npm install --prefix /path/to/opencode-v2 @opencode/cli@2.0.18
+TAKT_OPENCODE_VERSION=v2 TAKT_OPENCODE_PATH=/path/to/opencode-v2/node_modules/.bin/opencode takt run
+# Select a matching v1 binary to return to v1
+TAKT_OPENCODE_VERSION=v1 TAKT_OPENCODE_PATH=/path/to/opencode-v1 takt run
+```
+
+These variables select the runtime for the entire TAKT process, not individual step `provider_options`. Preserve both values in CI or your launcher. An unset path uses `opencode` from `PATH`. Session IDs cannot migrate across generations; start a new run after switching.
+
+For v2, TAKT updates session system instructions and permissions for every phase. Its bundled plugin enforces the tool allowlist; prompts are refused unless the plugin is active. Tool names map `bash` to `shell`, `task` to `subagent`, and `apply_patch` to `patch`. v2 reads directories with `read`, so the v1 `list` shim is unnecessary. Existing MCP settings are translated and allowed tools are exposed directly. Structured output uses the existing formatless prompt, JSON extraction, and schema validation path; v2 does not provide a native JSON Schema generation guarantee.
+
+After building, run `npm run test:opencode-v2-probe -- --cli /absolute/path/to/opencode-v2` for an isolated real-CLI acceptance probe with a mock LLM and MCP server. It does not use credentials or user OpenCode settings. Run `npm run test:opencode-probe` for the existing v1 regression probe.
+
+The v2 probe covers system instructions, read/write permissions across phases on one session, rejection of forbidden writes, schema output, questions, interruption and resume, compaction, resume after server restart, parallel session isolation, and stdio MCP tool execution. These contracts were exercised with CLI 2.0.18 on macOS and Node.js 26; hosted model behavior and remote MCP OAuth were not exercised. OAuth configuration translation is covered by unit tests. MCP tool discovery waits up to 30 seconds for the allowed tool IDs, or at least one registered tool per assigned server when using unrestricted tools. A server that only exposes resources has no usable tools on this path. v2 does not expose the v1 `todowrite` tool.
+
 
 ## Runtime Provider Configuration (runtime.yaml)
 
