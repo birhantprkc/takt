@@ -26,6 +26,7 @@ import type { WorkflowContext } from './interactive-summary-types.js';
 import {
   frameUserComment,
   formatLiteralBlock,
+  prependInteractiveTopicBoundary,
   prependSourceContext,
   prependSourceContextGuardToSystemPrompt,
 } from './promptSections.js';
@@ -98,7 +99,7 @@ export function buildInteractiveSystemPrompt(
   const tellAvailable = enableTellCommand;
   const formalSpec = input.formalSpec ?? false;
 
-  return loadTemplate('score_interactive_system_prompt', lang, {
+  return prependInteractiveTopicBoundary(lang, loadTemplate('score_interactive_system_prompt', lang, {
     grillMe: input.grillMe,
     tellAvailable,
     assistantRetryCommandsAvailable: enableAssistantRetryCommands,
@@ -116,7 +117,7 @@ export function buildInteractiveSystemPrompt(
     stepDetails: hasWorkflowPreview ? formatStepPreviews(stepPreviews, lang) : '',
     hasRunSession: input.runSessionContext !== undefined,
     ...runSessionVars,
-  });
+  }));
 }
 
 /** A resolved session plus the strategy every front-end drives it with. */

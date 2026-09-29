@@ -200,6 +200,7 @@ assistant:
 | `allow_git_hooks` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git hooks |
 | `allow_git_filters` | boolean | `false` | 允许 TAKT 管理的自动 commit 运行 git filters |
 | `auto_pr` | boolean | - | worktree 执行后自动创建 PR |
+| `caccia` | object | `{ enabled: false, wait_timeout_ms: 600000, max_iterations: 3, workflow: "caccia" }` | CodeRabbit 审查循环设置 |
 | `draft_pr` | boolean | `false` | 将自动创建的 PR 设为 draft |
 | `minimal_output` | boolean | `false` | 抑制 AI 输出（用于 CI） |
 | `runtime` | object | - | 运行环境默认值，例如 `prepare: [gradle, node]` |
@@ -242,6 +243,22 @@ assistant:
 | `workflow_overrides` | object | - | workflow 级 `quality_gates` 与 `quality_gates_edit_only` 覆盖 |
 | `sync_conflict_resolver` | object | `{ auto_approve_tools: false }` | sync conflict resolver 策略 |
 | `observability` | object | disabled | opt-in OpenTelemetry 基础设施 |
+
+## Caccia Review Loop
+
+`caccia` 可以设置在 `~/.takt/config.yaml` 或 `.takt/config.yaml` 中：
+
+```yaml
+caccia:
+  enabled: false          # 任务创建或更新 PR 后启用自动关联
+  wait_timeout_ms: 600000 # 等待初次审查和每次推送提交审查的上限（毫秒）
+  max_iterations: 3       # 修复和复审的最大轮数
+  workflow: caccia        # 用于判断和修复每组线程的 workflow
+```
+
+只有 `enabled: true` 时才运行自动关联。无论该开关为何值，都可以手动运行 `takt caccia <PR-number>`。默认值为关闭、600,000 毫秒、3 轮和 workflow `caccia`。如果项目中存在 `caccia` 配置块，它整体优先于全局块；所选配置块中省略的字段使用上述默认值。将 `workflow` 设置为 workflow 标识符即可替换 builtin workflow。
+
+`wait_timeout_ms` 同时适用于初次审查检查和每次推送提交后的复审等待。初次等待超时会跳过 Caccia；单独命令以非零状态退出，自动关联路径会安静跳过并保留任务结果。等待推送提交的复审超时则属于执行错误：单独命令以非零状态退出，自动关联路径会记录错误并保留已完成的任务结果。
 
 ## 项目配置
 
@@ -367,6 +384,7 @@ TAKT 观察实际收到的 provider event，不会合成 keepalive。OpenCode �
 | `allow_git_hooks` | boolean | `false` | 自动 commit 时允许 git hooks |
 | `allow_git_filters` | boolean | `false` | 自动 commit 时允许 git filters |
 | `auto_pr` | boolean | - | worktree 执行后自动创建 PR |
+| `caccia` | object | disabled | CodeRabbit 审查循环设置（见上文） |
 | `draft_pr` | boolean | `false`（来自全局） | 将自动创建的 PR 设为 draft |
 | `concurrency` | number (1-10) | `1`（来自全局） | `takt run` 并行任务数 |
 | `auto_requeue_max_attempts` | 非负整数 | `0` | 失败 workflow task 的自动 requeue 上限 |
@@ -919,8 +937,28 @@ install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，�
 - credential binding 由 source home、参照名和 endpoint 组成。session 存续期间改变其中任一项时，该 turn 会明确失败并提示启动新的 run，而不是静默重置会话。
 - store 更新和删除交给官方 runtime watcher；TAKT 不添加独立 watcher 或 credential cache。更新会在同一 session 的后续 turn 生效。删除的检测存在短暂延迟，runtime 可能用上次有效值再完成一个 turn；报告 credential 缺失的 turn 不会发送 HTTP 请求。
 - **注意：** 运行期间把 store 改成不合法 YAML 并不等于撤销 credential。固定版 `0.1.5rc1` 的已有 session 会继续使用上次有效值，修复文件后才在后续 turn 加载新值；启动时遇到不合法 YAML 则失败。已经发送的请求保留开始时的 Authorization，更新只影响 watcher reload 后的请求。不要把文件损坏或某个 turn 成功视为撤销或 reload 完成的证据，也不要假设写入后的下一 turn 会同步读取新值。
-- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved，不会假称已选择默认参照。未分类的 provider/transport 失败不展示上游 message 或 stderr tail；settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
+- 诊断不包含原始 HTTP body 或绝对 credential 路径，而是显示逻辑来源和修复方法。参照尚未解析时显示 unresolved。结构化失败可区分 model reference 错误、连接失败和 runtime 内部失败。已识别的一般 provider/transport 失败短语也可显示经过投影的上游 message，但必须整体符合封闭的安全单行格式。model ID 和主机名替换为 `[REDACTED]`；已识别的类 token 值、Authorization header 和敏感赋值（包括以 `_KEY`、`_TOKEN`、`_SECRET` 或 `_PASSWORD` 结尾的大写环境变量名）替换为固定占位符。已识别的 SDK JSON-RPC、transport-closed 和 timeout 异常只按异常类型显示固定原因，不复制 message、profile、cause 或 stderr。stderr 不用于收集、显示或分类。未识别的字段、任意文本、缺失或含糊的 message 均回退到固定 runtime-failure 诊断。这是范围有限的投影，无法保证任意自由文本中未知的 store-only secret 可安全显示。已验证路径和上游契约见下方的固定版 SDK 失败边界。settings 错误区分无法读取、大小超限、不合法 YAML、参照名错误和保存 endpoint 错误。端到端的非泄露保证仍受上述官方 runtime 已知问题限制。
 - TAKT 不扫描 `.env` 文件。credential 来自 store、所选参照对应的环境变量或官方 runtime 自身的解析路径。
+
+##### 固定版 SDK 失败边界（`0.1.5rc1`）
+
+下表基于 `src/infra/deepseek-harness/uv.lock` 固定的 Python SDK（`deepseek_harness/client.py`、`api.py`、`errors.py`）以及 TAKT 的 `bridge.py`、`runtime.ts`。并未验证官方原生 runtime 或远程 provider 的所有错误。
+SDK 核查位置包括 `client.py` 的 `_handle_message`／`initialize`（JSON-RPC 和子进程诊断）、`_runtime_closed_error`／`_write_message`（transport）、`_request_raw`／`initialize`（timeout）、`_default_launch_args`（内置 runtime），以及 `api.py` 的 `finish_reason`（协议错误）。
+
+| 失败来源 | TAKT 的诊断 | 不可直接显示的内容和条件 |
+| --- | --- | --- |
+| SDK `JsonRpcError`（`jsonrpc-error`） | 固定的 JSON-RPC 原因；保留已有的 credential 分类诊断 | runtime 提供的 message/data 及内嵌 stderr；数字 JSON-RPC code 还不是可信的原因分类。 |
+| SDK `TransportClosedError`（`transport-closed`） | 固定的连接关闭原因 | 异常内的退出文本和多行 stderr tail。 |
+| SDK 请求或初始化超时（`timeout`） | 固定的 `part_timeout` 原因 | profile、异常文本及内嵌 stderr；TAKT 自身的 timer 保留包含耗时的本地诊断。 |
+| SDK 协议错误（`malformed-response`） | 固定的 `provider_stream_parse_error` 原因 | 原始协议数据。 |
+| 缺少内置 runtime（`runtime-unavailable`） | 固定的 managed environment 修复指引 | SDK 异常文本和路径。 |
+| bridge 启动前的 managed SDK 探测与验证 | 本地核实的版本、Requires-Python 不匹配或 非零退出，使用固定的具体原因；其他情况使用通用修复指引 | 探测的 traceback 和 stderr 可能含任意值。 |
+| 其他 SDK/runtime 异常及 provider HTTP 文本（`runtime-error`、`turn/end`） | 仅投影整体符合已审查单行格式的内容，否则使用 `Upstream error details are withheld.` | 任意文本可能含有 TAKT 不知道的 store-only secret。 |
+| bridge worker / runtime 的 stderr | 不用于收集、显示或分类 | 即使看似安全也丢弃，且不影响 session 复用；异常内的 stderr 也不可信。 |
+
+只检查了固定版 `0.1.5rc1` Python SDK 的上述路径。原生 runtime 失败、provider HTTP body、通知、二进制文件特有的退出文本和未来版本**未被完整验证**。离线测试将不同的 dummy store-only 值放入 JSON-RPC message/data、异常与 cause、timeout profile、探测 traceback 和 stderr，检查 response、onStream、provider event log 和 trace report。测试通过并不能证明任意自由文本或未知编码安全；未知格式仍回退到固定诊断。
+
+若要安全地显示更多细节，官方 SDK/runtime 必须提供**带版本且有限枚举的原因 code**，并在可以读取 credential store 的一侧生成已去除 secret 和敏感 HTTP header/body 的显示字段。未经验证的 `safe` 标志、model、host、path、profile、cause chain 和 stderr 片段均不可信。当前的封闭 allowlist 是临时措施，核实上游契约后将替换；stderr 不在范围内。TAKT 应固定并校验该 schema，针对未知 code 和四个输出面中的 dummy store-only 值运行非泄露测试后才接入。该上游依赖由 [#1621](https://github.com/nrslib/takt/issues/1621) 跟踪；官方 SDK/runtime 更新不属于 #1605 或 PR #1619。测试不需要真实 credential 或用户错误日志。
 
 DeepSeek Harness provider 目前处于 developer preview 阶段。只有在明确接受会消耗 DeepSeek API quota 的情况下，才应运行下面的 live smoke。
 
@@ -1093,9 +1131,11 @@ provider_options:
 
 没有版本限定的显式 npm source 会依次复用已有的 project scope、user scope 安装；两者都无法解析为启用的资源时，才使用 temporary resolution，并且不会向持久 scope 安装。带版本限定的 npm source 始终使用 temporary resolution。显式资源不会写入 Pi 设置；隐式 project-local Pi 资源不会被信任或加载，只有为显式 npm source 检测到的绝对路径可以从 project package storage 复用。带有内嵌凭据或包含 secret 的 query 参数的 extension URL 会被拒绝。
 
-在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的所有 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 仍然只过滤 builtin tool，而 `allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
+在 `readonly` 和 `edit` 模式下，每个显式配置的 extension 注册的非 builtin 名称的 tool 会作为一个 trust unit 一起启用。自动 discovery 得到的 ambient extension tool 不会在这些 restrictive mode 中启用。非空的 `allowedTools` 过滤 builtin 名称，也适用于同名的 extension 版本；`allowedTools: []` 会拒绝所有 tool，包括显式 extension tool。仅包含空字符串或空白项的列表也按 deny-all 处理。Pi permission mode 是 active-tool allowlist，而不是操作系统 sandbox；即使 `permission_mode: readonly`，受信任的显式 extension 仍可能运行进程或修改文件。显式 extension 加载失败或 provenance 验证失败时，Pi call 会以错误停止。
 
 未指定 permission mode 时，显式 `allowedTools` 列表也会经过 tool 来源验证。自动发现的 extension tool 即使列在 `allowedTools` 中也会被排除；要启用 extension tool，必须在 `extensions` 中明确配置其来源，并在 `allowedTools` 中列出 tool 名称。配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
+
+当显式配置的 extension 在 factory 初始化时注册与 builtin 同名的 tool，extension 版本会像普通 Pi 一样替换 builtin。在 `readonly` 和 `edit` 中，该名称必须符合 mode 的 builtin 权限；如果指定了 `allowedTools`，还必须包含在列表中。未指定 permission mode 且显式指定 `allowedTools`，或 `full` 且列表仅包含 readonly tool 时，该名称也必须在列表中。例如，`readonly` + `['grep']` 不会启用 extension 的 `read`，`edit` + `['read']` 不会启用其 `bash`。被排除的名称不会回退到原来的 builtin。这些分支仍然排除 ambient 覆盖。在 `full` 以外的模式中，无法验证 provenance 时会停止 Pi call，包括在 `session_start` 中才更改 builtin 注册来源的情况。
 
 <a id="workflow-categories"></a>
 

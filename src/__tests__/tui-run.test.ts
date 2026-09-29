@@ -26,7 +26,6 @@ import { getLabel } from '../shared/i18n/index.js';
 
 const {
   mockRender,
-  mockRenderToString,
   mockCreateTuiConversation,
   mockDetermineWorkflow,
   mockSelectInteractiveMode,
@@ -47,7 +46,6 @@ const {
   realTuiConversation,
 } = vi.hoisted(() => ({
   mockRender: vi.fn(),
-  mockRenderToString: vi.fn(),
   mockCreateTuiConversation: vi.fn(),
   mockDetermineWorkflow: vi.fn(),
   mockSelectInteractiveMode: vi.fn(),
@@ -74,7 +72,7 @@ const mockCreateStore = (cwd: string): unknown => storeOverride.current?.(cwd);
 
 vi.mock('ink', () => ({
   render: (...args: unknown[]) => mockRender(...args),
-  renderToString: (...args: unknown[]) => mockRenderToString(...args),
+  Static: () => null,
   Box: () => null,
   Text: () => null,
   useInput: () => undefined,
@@ -201,7 +199,12 @@ function scriptRender(): MountedTree {
       resolveExit = resolve;
     });
     exitInk = resolveExit;
-    return { unmount, clear: () => undefined, waitUntilExit: () => exited };
+    return {
+      unmount,
+      clear: () => undefined,
+      waitUntilRenderFlush: async () => undefined,
+      waitUntilExit: () => exited,
+    };
   });
 
   const requireProps = (): ConversationViewProps => {
@@ -300,7 +303,6 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockRenderToString.mockReturnValue('final transcript');
   realTuiConversation.current = false;
   // clearAllMocks keeps implementations, and some cases install a throwing one.
   mockCreateTuiConversation.mockReset();
@@ -1975,63 +1977,6 @@ describe('runTui', () => {
   });
 
   describe('selectors between mounts', () => {
-    it('should hold the finalized transcript until Ink clears the live frame', async () => {
-      const written = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
-      const tree = scriptRender();
-      const run = startRun();
-      await waitForMount(tree, 1);
-      const entries = [
-        { role: 'user', content: 'question' },
-        { role: 'assistant', content: 'answer' },
-      ] as const;
-
-      const conversation = tree.conversationProps();
-      conversation.finalizeTranscript(entries, 14);
-
-      expect(mockRenderToString).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          props: expect.objectContaining({
-            entries,
-            userMessageColors: conversation.userMessageColors,
-          }),
-        }),
-        { columns: 14 },
-      );
-      expect(written.mock.calls.flat().map(String)).not.toContain('final transcript\n');
-
-      conversation.onExit(
-        { kind: 'result', result: { action: 'cancel', task: '' } },
-        { history: [], queue: [] },
-      );
-      await run;
-
-      expect(written.mock.calls.flat().map(String)
-        .filter((chunk) => chunk === 'final transcript\n')).toHaveLength(1);
-    });
-
-    it('should fail after unmount when writing the finalized transcript fails', async () => {
-      const failure = new Error('transcript write failed');
-      vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => {
-        if (String(chunk) === 'final transcript\n') {
-          throw failure;
-        }
-        return true;
-      }) as typeof process.stdout.write);
-      const tree = scriptRender();
-      const run = startRun();
-      await waitForMount(tree, 1);
-
-      const conversation = tree.conversationProps();
-      conversation.finalizeTranscript([{ role: 'user', content: 'question' }], 14);
-      conversation.onExit(
-        { kind: 'result', result: { action: 'cancel', task: '' } },
-        { history: [], queue: [] },
-      );
-
-      await expect(run).rejects.toBe(failure);
-      expect(tree.unmount).toHaveBeenCalledOnce();
-    });
-
     it('should run the action selector with Ink unmounted and finish on its choice', async () => {
       const tree = scriptRender();
       mockSelectAction.mockImplementation(() => {
@@ -2701,6 +2646,7 @@ describe('runTui', () => {
     /** Ink calls that fail at a chosen stage, so each teardown step can be exercised. */
     function scriptFailingRender(failing: {
       readonly render?: Error;
+      readonly waitUntilRenderFlush?: Error;
       readonly unmount?: Error;
       readonly waitUntilExit?: Error;
     }): {
@@ -2736,6 +2682,9 @@ describe('runTui', () => {
         return {
           unmount,
           clear: () => undefined,
+          waitUntilRenderFlush: () => failing.waitUntilRenderFlush === undefined
+            ? Promise.resolve()
+            : Promise.reject(failing.waitUntilRenderFlush),
           waitUntilExit: () => exitFailure ?? exited,
         };
       });
@@ -2789,6 +2738,18 @@ describe('runTui', () => {
       tree.exit();
 
       await expect(run).rejects.toBe(teardownFailure);
+      expectTerminalReleased();
+    });
+
+    it('should surface a render flush failure and still release the terminal', async () => {
+      const flushFailure = new Error('render flush exploded');
+      const tree = scriptFailingRender({ waitUntilRenderFlush: flushFailure });
+      const run = startRun();
+      await tree.waitForMount();
+      tree.exit();
+
+      await expect(run).rejects.toBe(flushFailure);
+      expect(tree.unmount).toHaveBeenCalledOnce();
       expectTerminalReleased();
     });
 

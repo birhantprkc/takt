@@ -303,6 +303,16 @@ takt list --non-interactive --action try --branch takt/my-branch
 
 利用可能なアクションは `diff`、`sync`、`try`、`merge`、`delete` です。
 
+## CodeRabbit レビューループ（`caccia`）
+
+タスク後処理で PR を新規作成または更新した後、TAKT は Caccia レビューループを実行できます。連結経路はデフォルトで無効です。project または global 設定で `caccia.enabled: true` にした場合だけ起動します。Pipeline モードでも `--auto-pr` による PR 作成成功後に同じ連結経路を使います。
+
+Caccia は CodeRabbit の投稿を待ち、`coderabbitai` が開始した未解決スレッドだけを処理します。各反復は一時クローンで指定された workflow を実行し、判断レポートを `.takt/runs/` に残し、修正を Push してから、その反復で判断したスレッドだけを Resolve し、Push したコミットへの CodeRabbit のレビューを待ちます。人が開始したスレッドは未解決のまま残します。PR へのコメントや返信は投稿しません。連結 Caccia の結果で完了済みタスクの結果は変わりません。成功と反復上限到達はログに記録し、設定済み通知経路にも送ります。
+
+`wait_timeout_ms` は初回レビューとPush後の各コミットへのレビュー待機に適用されます。初回待機がタイムアウトすると連結 Caccia は静かにスキップされ、タスク結果を保持します。Push後のレビュー待機がタイムアウトするとエラーをログに記録し、完了済みタスクの結果を保持します。単独の `takt caccia` はどちらのタイムアウトでも非ゼロで終了します。
+
+同じ機能は `takt caccia <PR番号>` で単独実行できます。結果と設定は [CLI リファレンス](./cli-reference.ja.md#takt-caccia) と[設定リファレンス](./configuration.ja.md)を参照してください。
+
 ## タスクディレクトリワークフロー
 
 推奨されるエンドツーエンドのワークフローは次の通りです。

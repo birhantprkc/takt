@@ -366,3 +366,10 @@ tui:
     requeueConfirm: "このタスクをキューに戻しますか？\nタスク: {task}\n要約: {summary}\nワークフロー: {workflow}\n開始位置: {start}"
     retryDetails: "タスク: {task}\n要約: {summary}\nワークフロー: {workflow}\n開始位置: {start}"
     exceededStart: "保存済みの停止位置: {start}（iteration {iteration}）"
+
+caccia:
+  success: "CodeRabbit の未解決レビュースレッドはありません。"
+  skipped: "Caccia をスキップしました: {reason}"
+  limit: "Caccia が反復上限に達しました。未解決スレッド: {count} 件"
+  failed: "Caccia に失敗しました: {error}"
+  notRun: "Caccia は起動されませんでした。"

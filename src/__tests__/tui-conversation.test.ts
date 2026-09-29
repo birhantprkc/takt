@@ -46,6 +46,7 @@ vi.mock('../features/interactive/assistantInitFiles.js', () => ({
 
 vi.mock('../features/interactive/formalSpecVerification.js', () => ({
   runFormalSpecVerification: (...args: unknown[]) => mockRunFormalSpecVerification(...args),
+  cleanupFormalSpecVerificationArtifacts: () => undefined,
 }));
 
 vi.mock('../features/interactive/taskInstructionFormat.js', async (importOriginal) => ({
@@ -849,6 +850,23 @@ describe('TUI local commands', () => {
       },
       persistSession: false,
     });
+    mockRunFormalSpecVerification.mockResolvedValueOnce({
+      verdict: 'passed',
+      verificationStarted: true,
+      quint: { status: 'passed' },
+      alloy: { status: 'passed' },
+      artifacts: {
+        runDirectory: '/repo/.takt/runs/verify-test',
+        specifications: { quint: '/repo/.takt/runs/verify-test/specs/spec.qnt' },
+        parseJson: '/repo/.takt/runs/verify-test/specs/parse.json',
+        logs: {
+          'quint-run': {
+            stdout: '/repo/.takt/runs/verify-test/logs/quint-run.stdout.log',
+            stderr: '/repo/.takt/runs/verify-test/logs/quint-run.stderr.log',
+          },
+        },
+      },
+    });
     mockCallAIWithRetry
       .mockResolvedValueOnce({
         result: { content: '```quint\nmodule currentAgreement {}\n```', sessionId: 'session-1', success: true },
@@ -877,7 +895,15 @@ describe('TUI local commands', () => {
     expect(mockCallAIWithRetry.mock.calls[1]?.[5]).toEqual(expect.objectContaining({
       permissionMode: 'readonly',
       internalAgentIsolation: 'strict-readonly',
+      allowReadonlyFileRead: true,
+      readonlyFileReadPaths: [
+        '/repo/.takt/runs/verify-test/specs/spec.qnt',
+        '/repo/.takt/runs/verify-test/specs/parse.json',
+        '/repo/.takt/runs/verify-test/logs/quint-run.stdout.log',
+        '/repo/.takt/runs/verify-test/logs/quint-run.stderr.log',
+      ],
     }));
+    expect(mockCallAIWithRetry.mock.calls[1]?.[2]).toEqual(['Read']);
     expect(chunks).toEqual([]);
   });
 

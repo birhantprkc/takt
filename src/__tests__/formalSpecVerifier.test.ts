@@ -40,9 +40,18 @@ const { failSpecsDirectoryCreation } = vi.hoisted(() => ({
   failSpecsDirectoryCreation: { enabled: false },
 }));
 
-const { failVerifyRunRemoval, processBoundaryControls } = vi.hoisted(() => ({
+const { failVerifyRunRemoval, processBoundaryControls, closeSyncControls, openSyncControls } = vi.hoisted(() => ({
   failVerifyRunRemoval: { enabled: false },
   processBoundaryControls: { throwOnSpawn: false },
+  closeSyncControls: {
+    failNext: false,
+    attempts: [] as number[],
+  },
+  openSyncControls: {
+    failPathSuffix: undefined as string | undefined,
+    attempts: [] as string[],
+    opened: [] as Array<{ path: string; fileDescriptor: number }>,
+  },
 }));
 
 vi.mock('node:fs', async () => {
@@ -56,6 +65,16 @@ vi.mock('node:fs', async () => {
       }
       return actual.mkdirSync(...args);
     },
+    openSync: (...args: Parameters<typeof actual.openSync>) => {
+      const path = String(args[0]);
+      openSyncControls.attempts.push(path);
+      if (openSyncControls.failPathSuffix !== undefined && path.endsWith(openSyncControls.failPathSuffix)) {
+        throw new Error('artifact log open failed');
+      }
+      const fileDescriptor = actual.openSync(...args);
+      openSyncControls.opened.push({ path, fileDescriptor });
+      return fileDescriptor;
+    },
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
       const options = args[1];
       if (failVerifyRunRemoval.enabled
@@ -67,6 +86,16 @@ vi.mock('node:fs', async () => {
       }
       return actual.rmSync(...args);
     },
+    closeSync: (...args: Parameters<typeof actual.closeSync>) => {
+      const [fileDescriptor] = args;
+      closeSyncControls.attempts.push(fileDescriptor);
+      if (closeSyncControls.failNext) {
+        closeSyncControls.failNext = false;
+        actual.closeSync(...args);
+        throw new Error('artifact log close failed');
+      }
+      return actual.closeSync(...args);
+    },
   };
 });
 
@@ -76,6 +105,7 @@ vi.mock('../shared/utils/spawn.js', () => ({
 
 import {
   detectJavaMajorVersion,
+  cleanupFormalSpecVerificationArtifacts,
   extractFormalSpecBlocks,
   runFormalSpecVerification,
   selectAlloyCheckTargets,
@@ -214,6 +244,11 @@ beforeEach(() => {
   failSpecsDirectoryCreation.enabled = false;
   failVerifyRunRemoval.enabled = false;
   processBoundaryControls.throwOnSpawn = false;
+  closeSyncControls.failNext = false;
+  closeSyncControls.attempts.length = 0;
+  openSyncControls.failPathSuffix = undefined;
+  openSyncControls.attempts.length = 0;
+  openSyncControls.opened.length = 0;
   alloyJarDigestOverride.value = undefined;
   delete process.env.TAKT_ALLOY_JAR;
   mockProcessBoundary();
@@ -290,7 +325,7 @@ describe('runFormalSpecVerification', () => {
     }
   });
 
-  it('should remove a workspace after a synchronous spawn failure with no child returned', async () => {
+  it('should retain a synchronous spawn failure workspace until the interpretation cleanup', async () => {
     const directory = createTestDirectory();
     processBoundaryControls.throwOnSpawn = true;
 
@@ -299,6 +334,10 @@ describe('runFormalSpecVerification', () => {
 
       expect(result).toMatchObject({ verdict: 'error', verificationStarted: true });
       expect(mockSpawnManagedProcess).toHaveBeenCalledOnce();
+      expect(readdirSync(join(directory, '.takt', 'runs'))
+        .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
+      expect(result.artifacts?.runDirectory).toBeDefined();
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))
         .filter((name) => name.startsWith('verify-'))).toEqual([]);
     } finally {
@@ -357,6 +396,7 @@ describe('runFormalSpecVerification', () => {
 
       expect(result.alloy).toMatchObject({ status: 'passed', checks: checkNumbers });
       expect(retainedSpecifications).toEqual(checkNumbers.map(() => true));
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -378,6 +418,9 @@ describe('runFormalSpecVerification', () => {
 
       expect(result.verdict).toBe('failed');
       expect(result.alloy).toMatchObject({ status: 'failed', message: 'counterexample' });
+      expect(readdirSync(join(directory, '.takt', 'runs'))
+        .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(join(directory, '.takt', 'runs'))
         .filter((name) => name.startsWith('verify-'))).toHaveLength(1);
     } finally {
@@ -416,6 +459,118 @@ describe('runFormalSpecVerification', () => {
       const statusless = await runFormalSpecVerification(quintResponse, directory, { modelCheckTimeoutSeconds: 300 });
       expect(statusless.verdict).toBe('error');
       expect(statusless.quint.run).toMatchObject({ status: 'error' });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should fail a successful exit when closing its diagnostic artifact fails', async () => {
+    const directory = createTestDirectory();
+    closeSyncControls.failNext = true;
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.quint.parse).toMatchObject({ status: 'error' });
+      expect(result.quint.parse?.message).toContain('artifact log close failed');
+      expect(closeSyncControls.attempts).toHaveLength(2);
+      expect(new Set(closeSyncControls.attempts)).toHaveLength(2);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should retain a Java version artifact close error instead of skipping verification', async () => {
+    const directory = createTestDirectory();
+    processResponses.push(
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      {
+        code: 0,
+        stderr: 'openjdk version "17.0.1"',
+        beforeExit: async () => {
+          closeSyncControls.failNext = true;
+        },
+      },
+    );
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.message).toContain('artifact log close failed');
+      expect(result.quint.status).toBe('error');
+      expect(spawnedProcesses).toHaveLength(4);
+      expect(spawnedProcesses.at(-1)).toMatchObject({ command: 'java', args: ['-version'] });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['stdout', 'java-version.stdout.log'],
+    ['stderr', 'java-version.stderr.log'],
+  ])('should retain a Java version %s log open error instead of skipping verification', async (stream, pathSuffix) => {
+    const directory = createTestDirectory();
+    openSyncControls.failPathSuffix = pathSuffix;
+    processResponses.push({ code: 0 }, { code: 0 }, { code: 0 });
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.verdict).toBe('error');
+      expect(result.message).toContain('artifact log open failed');
+      expect(result.quint.status).toBe('error');
+      expect(spawnedProcesses).toHaveLength(3);
+
+      if (stream === 'stderr') {
+        const javaVersionStdout = openSyncControls.opened.find(({ path }) => path.endsWith('java-version.stdout.log'));
+        expect(javaVersionStdout).toBeDefined();
+        if (javaVersionStdout === undefined) {
+          throw new Error('Java version stdout log was not opened before stderr failed');
+        }
+        expect(closeSyncControls.attempts).toContain(javaVersionStdout.fileDescriptor);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should keep verification skipped when Java is unavailable and its diagnostic logs open', async () => {
+    const directory = createTestDirectory();
+    processResponses.push(
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      { error: new Error('spawn java ENOENT') },
+    );
+
+    try {
+      const result = await runFormalSpecVerification(
+        '```quint\nmodule verify {}\n```',
+        directory,
+        { modelCheckTimeoutSeconds: 300 },
+      );
+
+      expect(result.quint.verify).toMatchObject({
+        status: 'skipped',
+        message: 'Java 17 or later was not detected; Quint verification was skipped.',
+      });
+      expect(spawnedProcesses.at(-1)).toMatchObject({ command: 'java', args: ['-version'] });
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
@@ -820,6 +975,43 @@ describe('runFormalSpecVerification', () => {
     }
   });
 
+  it('should surface Quint parse.json errors[] when --out captures diagnostics that stdout/stderr do not', async () => {
+    const directory = createTestDirectory();
+    parseResult = {
+      errors: [
+        {
+          explanation: "[QNT101] Built-in name 'enabled' is redefined in module 'm'",
+          locs: [{ source: 'spec.qnt', start: { line: 4, col: 2, index: 0 } }],
+        },
+      ],
+    };
+    processResponses.push({ code: 1 });
+
+    try {
+      const result = await runFormalSpecVerification('```quint\nmodule invalid {}\n```', directory, { modelCheckTimeoutSeconds: 300 });
+
+      expect(result.quint.parse).toMatchObject({ status: 'error' });
+      expect(result.quint.parse?.message).toContain('[QNT101]');
+      expect(result.quint.parse?.message).toContain('spec.qnt:5:3');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('should fall back to the process-failure message when parse.json has no errors[]', async () => {
+    const directory = createTestDirectory();
+    parseResult = { modules: [] };
+    processResponses.push({ code: 1, stderr: 'Quint parse failed' });
+
+    try {
+      const result = await runFormalSpecVerification('```quint\nmodule invalid {}\n```', directory, { modelCheckTimeoutSeconds: 300 });
+
+      expect(result.quint.parse).toMatchObject({ status: 'error', message: 'Quint parse failed' });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it('should collect Alloy results after an independent Quint parse error and clean the run directory', async () => {
     const directory = createTestDirectory();
     installConfiguredAlloyJar(directory);
@@ -846,6 +1038,7 @@ describe('runFormalSpecVerification', () => {
       expect(spawnedProcesses.every(({ options }) => options.cwd?.includes('/.takt/runs/verify-'))).toBe(true);
       expect(spawnedProcesses.every(({ options }) => options.env?.TMPDIR === options.cwd)).toBe(true);
       const runParent = join(directory, '.takt', 'runs');
+      cleanupFormalSpecVerificationArtifacts(result);
       expect(readdirSync(runParent).filter((name) => name.startsWith('verify-'))).toEqual([]);
     } finally {
       rmSync(directory, { recursive: true, force: true });

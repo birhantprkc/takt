@@ -366,3 +366,10 @@ tui:
     requeueConfirm: "Return this task to the queue?\nTask: {task}\nSummary: {summary}\nWorkflow: {workflow}\nStart position: {start}"
     retryDetails: "Task: {task}\nSummary: {summary}\nWorkflow: {workflow}\nStart position: {start}"
     exceededStart: "Saved stopping position: {start} (iteration {iteration})"
+
+caccia:
+  success: "No unresolved CodeRabbit review threads remain."
+  skipped: "Caccia skipped: {reason}"
+  limit: "Caccia reached its iteration limit with {count} unresolved thread(s)."
+  failed: "Caccia failed: {error}"
+  notRun: "Caccia was not started."
