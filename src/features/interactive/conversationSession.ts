@@ -66,6 +66,8 @@ export interface ConversationSessionStrategy {
   formalSpecInitialContext?: string;
   /** Enable the `/tell` command. */
   enableTellCommand?: boolean;
+  /** Enable task requeue commands for assistant conversations. */
+  enableAssistantRetryCommands?: boolean;
   /** Run to use as the initial `/tell` choice. */
   initialReferenceRunSlug?: string;
 }
@@ -170,6 +172,8 @@ export interface InteractiveConversationSession extends ConversationSession {
   recordRejectedDraft(task: string): void;
   /** Continue from a previously recorded provider session (/resume). */
   setSessionId(nextSessionId: string): void;
+  /** Current provider session used by this conversation. */
+  getSessionId(): string | undefined;
   /** Apply the prompt configuration resolved for the selected session. */
   setPromptConfiguration(configuration: ConversationPromptConfiguration): void;
   /** Snapshot every user/assistant message a replacement session still needs. */
@@ -278,6 +282,7 @@ export function createConversationSession(options: ConversationSessionOptions): 
   let commandAvailability: CommandAvailability = resolveFormalSpecCommandAvailability(
     {
       enableTellCommand: options.strategy.enableTellCommand === true,
+      enableAssistantRetryCommands: options.strategy.enableAssistantRetryCommands === true,
       ...(options.strategy.enabledCommands
         ? { enabledCommands: options.strategy.enabledCommands }
         : {}),
@@ -714,6 +719,10 @@ export function createConversationSession(options: ConversationSessionOptions): 
 
     setSessionId(nextSessionId: string): void {
       sessionId = nextSessionId;
+    },
+
+    getSessionId(): string | undefined {
+      return sessionId;
     },
 
     setPromptConfiguration(configuration: ConversationPromptConfiguration): void {

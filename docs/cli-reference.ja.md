@@ -55,7 +55,7 @@ Chat の transcript は role ごとに描画されます。assistant の応答�
 
 AI との会話を通じてタスク内容を精緻化してから実行するモードです。タスクの要件が曖昧な場合や、AI と相談しながら内容を詰めたい場合に便利です。
 
-通常の assistant 会話では、読み取り専用 MCP tool を通じてタスクと run の要約も確認できます。タスクは名前または要約で指定し、詳細なログやレポートは特定した run に必要な場合だけ読み取ります。新しいタスクの内容が固まったら `/go`、実行中の worktree clone へ追加指示を送る内容が固まったら `/tell` を使用します。
+通常の assistant 会話では、読み取り専用 MCP tool を通じてタスクと run の要約も確認できます。タスクは名前または要約で指定し、詳細なログやレポートは特定した run に必要な場合だけ読み取ります。新しいタスクには `/go`、実行中の worktree clone への追加指示には `/tell`、失敗タスクの再投入には `/requeue` または `/retry` を使用します。
 
 ```bash
 # インタラクティブモードを開始（引数なし）
@@ -97,8 +97,12 @@ TUI の会話履歴では、送信済みのユーザー発言を、表示幅い�
 | `/model <value>` | この会話で使う任意の model 名を指定する。 |
 | `/effort <value>` | この会話で使う任意の推論強度を指定する。 |
 | `/tell [指示]` | 実行中の worktree clone タスクを選び、追加指示を確認してから送る。指示を省略すると、そのタスクに関する最新の話題から単独で理解できる追加指示本文を生成する。対話端末が必要で、確認できない場合は送信しない。 |
+| `/requeue [補足]` | assistant / grill-me 会話で、会話から失敗・exceeded タスクを決める。failed タスクは会話から開始位置を決め、exceeded タスクは保存済みの停止位置を引き継ぐ。対象情報を表示して Y/n で確認する。補足はタスク名ではなく判断の手掛かりとして扱う。 |
+| `/retry [補足]` | assistant / grill-me 会話で、会話から失敗タスクを決め、改訂後の order 全文を作成して「タスクにつむ」または「会話を続ける」で確認する。 |
 
 `/tell` は通常の CLI/TUI の `assistant`、`grill-me`、`persona` 会話で利用でき、これらのモード間を切り替えた後も利用できます。送信先を選ぶには、有効な TAKT 管理の worktree clone で実行中のタスクが必要です。Web UI はローカルの `/tell` handoff を実行せず、`/tell このタスクを確認` のような入力も通常のメッセージとして assistant に送ります。Retry と Instruct の専用会話では `/tell` を公開せず、それぞれのタスク操作を使用します。
+
+`/requeue` と assistant 会話の `/retry` は CLI/TUI の `assistant` と `grill-me` だけで利用できます。`/requeue` は failed と exceeded、`/retry` は failed を対象にし、タスクと failed タスクの開始位置は会話から決まります。候補がない場合や対象を一意に決められない場合は、確認画面を出さず会話に通知します。`/requeue` はタスク名、要約、workflow、開始位置を表示して Y/n で確認し、承認後に `order.md` を変えず `pending` に戻します。`/retry` は同じ対象情報と改訂後の `order.md` 全文を表示し、「タスクにつむ」を選ぶと旧版をアーカイブして `pending` に戻します。「会話を続ける」では変更せず会話へ戻ります。どちらも workflow をその場で開始しません。対話端末が必要です。persona 会話と Web UI ではコマンド文字列は通常メッセージとして扱われます。`takt resume` の専用 retry 会話で使う既存の `/retry` は別経路です。 Workflow Maker（`takt make`）では、これらの文字列はタスク操作を実行せず、通常の会話メッセージとしてproviderへ送られます。
 
 選択内容は一時的で永続化されません。workflow、mode、provider、model の変更は、次の通常メッセージまたは `/go` で新しい AI session を作り、以前の会話履歴を参照情報として1回だけ渡します。effort だけの変更は現在の session の次回呼び出しへ適用されます。provider を変更すると、一時的な model と effort は消去されます。次の入力までに同じ設定コマンドを複数回実行した場合は、各設定で最後に選択した値だけが適用されます。これらの会話用 override は workflow 実行には影響しません。
 

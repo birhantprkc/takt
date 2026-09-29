@@ -125,6 +125,7 @@ function createScriptedConversation(
   const resumedSessions: string[] = [];
   const sealCalls: boolean[] = [];
   const savedImages: PastedImage[] = [];
+  let activeSessionId: string | undefined;
   let settleSubmission: ((submission: TuiSubmission) => void) | null = null;
   let failSubmission: ((error: Error) => void) | null = null;
 
@@ -172,7 +173,11 @@ function createScriptedConversation(
     },
     resumeSession(sessionId: string): Promise<string | undefined> {
       resumedSessions.push(sessionId);
+      activeSessionId = sessionId;
       return Promise.resolve(undefined);
+    },
+    getSessionId(): string | undefined {
+      return activeSessionId;
     },
     pasteClipboardImage(): Promise<string> {
       return Promise.resolve(PASTED_IMAGE_PLACEHOLDER);

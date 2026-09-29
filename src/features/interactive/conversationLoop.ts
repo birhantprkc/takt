@@ -48,6 +48,7 @@ import { prependInitialPromptContext } from './promptSections.js';
 import type { PermissionMode } from '../../core/models/index.js';
 import type { InternalAgentIsolation } from '../../shared/types/provider.js';
 import { runTellCommand } from './tellCommand.js';
+import { runAssistantRetryCommand } from './assistantRetryCommand.js';
 import {
   buildInteractiveResultWithAttachments,
   cleanupImageAttachmentStore,
@@ -192,6 +193,8 @@ export interface ConversationStrategy {
   enabledCommands?: readonly SlashCommand[];
   /** Enable the `/tell` command. */
   enableTellCommand?: boolean;
+  /** Enable task requeue commands for assistant conversations. */
+  enableAssistantRetryCommands?: boolean;
   /** Run to use as the initial `/tell` choice. */
   initialReferenceRunSlug?: string;
   /** Capability notice shown before the first user input. */
@@ -485,6 +488,9 @@ export async function runConversationLoop(
       ...(strategy.enableTellCommand === undefined
         ? {}
         : { enableTellCommand: strategy.enableTellCommand }),
+      ...(strategy.enableAssistantRetryCommands === undefined
+        ? {}
+        : { enableAssistantRetryCommands: strategy.enableAssistantRetryCommands }),
       ...(strategy.enableOpenCommand === true ? { enableOpenCommand: true } : {}),
       enabledCommands: strategy.enabledCommands,
     }, activePromptConfiguration.formalSpec);
@@ -571,8 +577,25 @@ export async function runConversationLoop(
         }
 
         case SlashCommand.Retry: {
-          if (!strategy.enableRetryCommand) {
-            info(ui.retryUnavailable);
+          if (strategy.enableAssistantRetryCommands === true) {
+            const notice = await runAssistantRetryCommand({
+              cwd,
+              lang: ctx.lang,
+              command: 'retry',
+              inlineText: match.text,
+              history,
+              sessionContext: { ...ctx, sessionId },
+              workflowContext,
+              ...(sourceContext === undefined ? {} : { sourceContext }),
+              ...(strategy.summaryPromptContext === undefined
+                ? {}
+                : { promptContext: strategy.summaryPromptContext }),
+              formalSpec: activePromptConfiguration.formalSpec,
+              formalSpecComments: activePromptConfiguration.formalSpecComments,
+              conversationLabel,
+              noTranscriptNote: noTranscript,
+            });
+            info(notice);
             continue;
           }
           const retryOrder = resolvePreviousOrder(strategy.previousOrderContent);
@@ -588,6 +611,28 @@ export async function runConversationLoop(
             continue;
           }
           return selectedAction;
+        }
+
+        case SlashCommand.Requeue: {
+          const notice = await runAssistantRetryCommand({
+            cwd,
+            lang: ctx.lang,
+            command: 'requeue',
+            inlineText: match.text,
+            history,
+            sessionContext: { ...ctx, sessionId },
+            workflowContext,
+            ...(sourceContext === undefined ? {} : { sourceContext }),
+            ...(strategy.summaryPromptContext === undefined
+              ? {}
+              : { promptContext: strategy.summaryPromptContext }),
+            formalSpec: activePromptConfiguration.formalSpec,
+            formalSpecComments: activePromptConfiguration.formalSpecComments,
+            conversationLabel,
+            noTranscriptNote: noTranscript,
+          });
+          info(notice);
+          continue;
         }
 
         case SlashCommand.Go: {

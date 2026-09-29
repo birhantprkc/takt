@@ -160,7 +160,6 @@ vi.mock('../shared/i18n/index.js', () => ({
     actionPrompt: 'What next?',
     cancelled: 'Cancelled',
     acceptNoAssistant: 'No assistant response',
-    retryUnavailable: 'Retry unavailable',
     retryNoOrder: 'No order',
     pasteImageUnavailable: 'Paste unavailable',
     actions: { execute: 'Execute', saveTask: 'Save', continue: 'Continue' },
@@ -173,6 +172,16 @@ vi.mock('../features/interactive/index.js', () => ({
   selectRun: (...args: unknown[]) => mockSelectRun(...args),
   loadRunSessionContext: (...args: unknown[]) => mockLoadRunSessionContext(...args),
   findRunForTask: (...args: unknown[]) => mockFindRunForTask(...args),
+}));
+
+vi.mock('../features/interactive/runSelector.js', () => ({
+  selectRun: (...args: unknown[]) => mockSelectRun(...args),
+}));
+
+vi.mock('../features/interactive/runSessionReader.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  listRecentRuns: (...args: unknown[]) => mockListRecentRuns(...args),
+  loadRunSessionContext: (...args: unknown[]) => mockLoadRunSessionContext(...args),
 }));
 
 vi.mock('../features/tasks/execute/taskExecution.js', () => ({
@@ -214,7 +223,6 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
 }));
 
 import { instructBranch } from '../features/tasks/list/taskActions.js';
-import { loadRunSessionContext as loadRealRunSessionContext } from '../features/interactive/runSessionReader.js';
 import { LiveInterventionFileStore } from '../infra/workflow/live-intervention-store.js';
 import {
   restoreStdin,
@@ -1125,9 +1133,12 @@ describe('instructBranch direct execution flow', () => {
       { slug: 'run-1', task: 'done', workflow: 'default', status: 'completed', startTime: '2026-09-03T00:00:00Z' },
     ]);
     mockSelectRun.mockResolvedValue('run-1');
+    const realRunSessionReader = await vi.importActual<
+      typeof import('../features/interactive/runSessionReader.js')
+    >('../features/interactive/runSessionReader.js');
     mockLoadRunSessionContext.mockImplementation((cwd: string, slug: string, options?: {
       readonly liveInterventionProjectCwd?: string;
-    }) => loadRealRunSessionContext(cwd, slug, options));
+    }) => realRunSessionReader.loadRunSessionContext(cwd, slug, options));
     const { provider, capture } = createMockProvider(['provider response']);
     mockGetProvider.mockReturnValue(provider);
     setupRawStdin(toRawInputs(['project historyを確認する', '/cancel']));

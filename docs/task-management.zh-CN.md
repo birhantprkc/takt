@@ -48,7 +48,7 @@ takt add #28
 
 MCP 客户端可以使用 `takt-mcp` stdio server 保存待处理任务、读取 task/run 状态，并向正在运行的 worktree clone 任务发送追加指令，无需调用 shell 命令。`takt_enqueue_task` 将待处理记录写入 `.takt/tasks.yaml`；`takt_list_tasks` 返回紧凑摘要，`takt_get_run` 读取一个 run 的详细信息，`takt_tell_run` 重新确认后只向正在运行的 clone 写入。如果创建 Issue 后保存任务失败且已解析到 Issue 编号，Issue 会保持打开，MCP 错误结果会返回编号以便重试；如果无法解析编号，结果可能提供 Issue URL。工具要求 server 允许的项目根目录内的绝对路径 `cwd`；enqueue 和 tell 还要求非空正文。使用 `takt run` 执行，使用 `takt watch` 监视和持续执行。输入字段详见 [CLI 参考](./cli-reference.zh-CN.md#mcp-server)。
 
-普通 assistant 对话在 provider 支持 MCP 时只接收只读的 task 状态工具。新任务使用 `/go`，向正在运行的 worktree clone 追加指令时使用 `/tell` 选择目标、查看内容并确认。不支持 MCP 的 provider 仍可继续对话，但无法查询 task 状态。
+普通 assistant 对话在 provider 支持 MCP 时只接收只读的 task 状态工具。新任务使用 `/go`，向正在运行的 worktree clone 追加指令时使用 `/tell` 选择目标、查看内容并确认，重新排队失败任务时使用 `/requeue` 或 `/retry`。不支持 MCP 的 provider 仍可继续对话，但无法查询 task 状态。
 
 ## 任务目录格式
 
@@ -208,6 +208,8 @@ takt list
 | **Create PR** | 将失败 run 的修改提交并 push，创建 pull request |
 | **Delete** | 删除失败任务记录 |
 
+在 CLI/TUI 的 assistant 和 grill-me 对话中，`/requeue [补充说明]` 根据对话确定 failed 任务和起点，显示任务名称、摘要、workflow 和起点后请求 Y/n 确认。确认后会将任务置为 `pending`，不修改 `order.md`。`/retry [补充说明]` 根据对话确定 failed 任务，显示完整修订 order，并让用户选择 **Save task** 或 **Continue**。Save task 会归档旧版并将任务置为 `pending`；Continue 不修改任务并返回对话。补充说明仅作为对话判断的参考，不直接指定任务。目标含糊或没有候选时会返回提示，不显示确认界面。两种命令都需要交互式终端，也不会立即启动 workflow。在 persona 对话和 Web UI 中，这些命令文本作为普通消息处理。`takt resume` 中面向直接 run 的 `/retry` 保持独立。
+
 ### Pending 任务的操作
 
 | 操作 | 说明 |
@@ -228,6 +230,8 @@ takt list
 |------|------|
 | **Requeue** | 返回 `pending`，从停止处继续 |
 | **Delete** | 永久删除任务 |
+
+会话中的 `/requeue` 也可以处理 exceeded 任务。确认已停止的位置后，它会保留已有恢复信息并将任务置为 `pending`，不提供起点选择，也不会启动 worker。
 
 ### PR-Failed 任务的操作
 

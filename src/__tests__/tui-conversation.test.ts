@@ -531,6 +531,74 @@ describe('notices from a turn the user left behind', () => {
 });
 
 describe('TUI local commands', () => {
+  it('exposes the active provider session after /resume updates the conversation', async () => {
+    const conversation = createConversation();
+
+    expect(conversation.getSessionId()).toBeUndefined();
+    await conversation.resumeSession('resumed-session');
+
+    expect(conversation.getSessionId()).toBe('resumed-session');
+    expect(conversation.snapshotHistory?.()).toEqual([]);
+  });
+
+  it.each(['assistant', 'grill-me'] as const)(
+    'should hand off assistant task commands from %s mode',
+    (mode) => {
+      const conversation = createConversationForMode(mode);
+
+      expect(conversation.commandAvailability.enableAssistantRetryCommands).toBe(true);
+      expect(filterSlashCommands('/requeue', conversation.commandAvailability)).toEqual([{
+        command: '/requeue',
+        labelKey: 'interactive.commands.requeue',
+      }]);
+      const completions = resolveSlashCompletions(
+        '/re',
+        conversation.lang,
+        conversation.commandAvailability,
+      ).map((completion) => completion.command);
+      expect(completions).toContain('/requeue');
+      expect(completions).toContain('/retry');
+      expect(conversation.isCommandLine('/requeue')).toBe(true);
+      expect(conversation.resolveLocalCommand('/requeue')).toEqual({
+        kind: 'handoff',
+        id: 'assistant-requeue',
+      });
+      expect(conversation.resolveLocalCommand('/retry')).toEqual({
+        kind: 'handoff',
+        id: 'assistant-retry',
+      });
+    },
+  );
+
+  it.each([
+    ['assistant description in English', 'en', { enableAssistantRetryCommands: true }, 'Revise a failed task instruction and queue it'],
+    ['assistant description in Japanese', 'ja', { enableAssistantRetryCommands: true }, '失敗タスクの指示書を改訂して再投入'],
+    ['saved-order description in English', 'en', { enableRetryCommand: true }, 'Review and resubmit the saved task instruction'],
+    ['saved-order description in Japanese', 'ja', { enableRetryCommand: true }, '保存済みの指示書を確認して再投入'],
+  ] as const)('uses the operation-specific /retry completion for %s', (_label, lang, availability, expected) => {
+    expect(resolveSlashCompletions('/retry', lang, availability)).toEqual([{
+      command: '/retry',
+      description: expected,
+    }]);
+  });
+
+  it('should treat assistant task commands as regular messages in persona mode', () => {
+    const conversation = createConversationForMode('persona');
+
+    expect(conversation.commandAvailability.enableAssistantRetryCommands).not.toBe(true);
+    const completions = resolveSlashCompletions(
+      '/re',
+      conversation.lang,
+      conversation.commandAvailability,
+    ).map((completion) => completion.command);
+    expect(completions).not.toContain('/requeue');
+    expect(completions).not.toContain('/retry');
+    expect(conversation.isCommandLine('/requeue')).toBe(false);
+    expect(conversation.isCommandLine('/retry')).toBe(false);
+    expect(conversation.resolveLocalCommand('/requeue')).toBeNull();
+    expect(conversation.resolveLocalCommand('/retry')).toBeNull();
+  });
+
   it.each(['assistant', 'grill-me', 'persona'] as const)(
     'should expose and recognize /tell in %s mode',
     (mode) => {
@@ -867,23 +935,21 @@ describe('TUI local commands', () => {
     );
   });
 
-  it('should report /replay and /retry as unavailable, matching the readline loop', () => {
+  it('should leave /replay unavailable while assistant /retry uses the task handoff', () => {
     const conversation = createConversation();
 
     expect(conversation.resolveLocalCommand('/replay')).toEqual({
       kind: 'notice',
       message: getLabel('instruct.ui.replayNoOrder', 'en'),
     });
-    expect(conversation.resolveLocalCommand('/retry')).toEqual({
-      kind: 'notice',
-      message: getLabel('interactive.ui.retryUnavailable', 'en'),
-    });
+    expect(conversation.resolveLocalCommand('/retry')).toMatchObject({ kind: 'handoff' });
     expect(conversation.commandAvailability).toMatchObject({
       enableRetryCommand: false,
       hasPreviousOrder: false,
       enableSettingsCommands: true,
       enableTellCommand: true,
     });
+    expect(conversation.commandAvailability.enableAssistantRetryCommands).toBe(true);
     expect(conversation.commandAvailability.enabledCommands).toEqual(
       expect.arrayContaining([SlashCommand.Go, SlashCommand.Cancel]),
     );
@@ -896,7 +962,12 @@ describe('TUI local commands', () => {
       cwd: '/repo',
       plan: {
         ...plan,
-        strategy: { ...plan.strategy, previousOrderContent: '', enableRetryCommand: true },
+        strategy: Object.assign({}, plan.strategy, {
+          ...plan.strategy,
+          previousOrderContent: '',
+          enableRetryCommand: true,
+          enableAssistantRetryCommands: false,
+        }),
       },
       attachmentStore: createSessionImageAttachmentStore('/repo'),
     });
@@ -923,11 +994,12 @@ describe('TUI local commands', () => {
       cwd: '/repo',
       plan: {
         ...plan,
-        strategy: {
+        strategy: Object.assign({}, plan.strategy, {
           ...plan.strategy,
           previousOrderContent: '# Previous order',
           enableRetryCommand: true,
-        },
+          enableAssistantRetryCommands: false,
+        }),
       },
       attachmentStore: createSessionImageAttachmentStore('/repo'),
     });
@@ -1166,6 +1238,7 @@ describe('TUI local commands', () => {
         strategy: {
           ...plan.strategy,
           enableRetryCommand: true,
+          enableAssistantRetryCommands: false,
           previousOrderContent: 'previous order',
           trackResultSource: true,
         },

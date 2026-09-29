@@ -134,6 +134,10 @@ vi.mock('../features/interactive/index.js', () => ({
   findPreviousOrderContent: mockFindPreviousOrderContent,
 }));
 
+vi.mock('../features/interactive/runSessionReader.js', () => ({
+  findRunForTask: mockFindRunForTask,
+}));
+
 vi.mock('../core/workflow/run/run-meta.js', () => ({
   readRunMetaBySlug: mockReadRunMetaBySlug,
 }));
@@ -1263,11 +1267,9 @@ describe('retryFailedTask', () => {
     }));
   });
 
-  it('should reject immediate execution and roll back the revised order without queueing', async () => {
+  it('should reject immediate execution without persisting or queueing', async () => {
     const task = makeFailedTask();
-    const revision = createPersistedTaskOrderRevisionMock('/project', task.taskDir);
     const cleanupAttachments = vi.fn();
-    mockPersistTaskOrderRevision.mockReturnValueOnce(revision);
     mockRunTaskRetryMode.mockResolvedValue(withAttachmentCleanup({
       action: 'execute',
       task: 'Use [Image #1].',
@@ -1279,14 +1281,8 @@ describe('retryFailedTask', () => {
       'Retry must finish by queueing the revised task.',
     );
 
-    expect(mockPersistTaskOrderRevision).toHaveBeenCalledWith(
-      '/project',
-      undefined,
-      'Use [Image #1].',
-      'en',
-      [testAttachment],
-    );
-    expect(mockCleanupPersistedTaskOrderRevision).toHaveBeenCalledExactlyOnceWith(revision);
+    expect(mockPersistTaskOrderRevision).not.toHaveBeenCalled();
+    expect(mockCleanupPersistedTaskOrderRevision).not.toHaveBeenCalled();
     expect(mockRequeueTask).not.toHaveBeenCalled();
     expect(mockStartReExecution).not.toHaveBeenCalled();
     expect(mockExecuteAndCompleteTask).not.toHaveBeenCalled();
