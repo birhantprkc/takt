@@ -1,5 +1,7 @@
 export const DEEPSEEK_HARNESS_DEFAULT_PROVIDER = 'deepseek-official';
 export const DEEPSEEK_HARNESS_DEFAULT_MODEL = 'deepseek-v4-flash';
+export const DEEPSEEK_HARNESS_DEFAULT_CREDENTIAL_REFERENCE = 'DEEPSEEK_API_KEY';
+export const DEEPSEEK_HARNESS_PUBLIC_BASE_URL = 'https://api.deepseek.com';
 
 export const DEEPSEEK_HARNESS_PYTHON_VERSION = '3.12';
 export const DEEPSEEK_HARNESS_PYTHON_REQUIRES = '>=3.12,<3.13';

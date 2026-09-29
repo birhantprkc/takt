@@ -118,7 +118,7 @@ managed environment 使用 uv-managed CPython 3.12，以及同捆 `pyproject.tom
 
 如果之前通过 `pip` 配置 package index，请迁移到 uv 标准的 `UV_INDEX_URL`、proxy 和 certificate 环境变量；`uv sync --locked` 将同捆 lock 作为依赖来源。
 
-install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，因为只支持 managed environment。请设置 `DEEPSEEK_API_KEY`，也可以设置 `DEEPSEEK_BASE_URL`。这是 developer-preview 兼容性边界；使用新的 SDK/runtime 组合前，请按照配置指南执行 opt-in live smoke。
+install 的 `--python` 选项和 provider 的 `python_path` 选项已删除，因为只支持 managed environment。认证使用官方 DeepSeek Harness credential store（`$DSH_HOME/.credentials.yaml`，默认 `~/.dsh/.credentials.yaml`），或所选参照对应的环境变量，例如 `DEEPSEEK_API_KEY`；TAKT 不读取或改写保存的 credential。`DEEPSEEK_BASE_URL` 为可选设置。这是 developer-preview 兼容性边界；使用新的 SDK/runtime 组合前，请阅读[配置指南](./configuration.zh-CN.md)中的 credential store 限制并执行 opt-in live smoke。固定版 runtime `0.1.5rc1` 仍有错误中反射的 credential 被写入通知和保存 session 的问题，成功调用不代表该问题已解决。
 
 以下 provider 需要外部 CLI：
 
@@ -369,7 +369,7 @@ export TAKT_OPENCODE_API_KEY=...           # OpenCode
 export TAKT_CURSOR_API_KEY=...             # Cursor Agent（可选）
 export TAKT_COPILOT_GITHUB_TOKEN=ghp_...   # GitHub Copilot CLI
 export TAKT_KIRO_API_KEY=...               # Kiro CLI
-export DEEPSEEK_API_KEY=...                 # 官方 DeepSeek Harness SDK
+export DEEPSEEK_API_KEY=...                 # 官方 DeepSeek Harness SDK；使用保存的 credential 时可省略
 # 可选：export DEEPSEEK_BASE_URL=https://...
 # Pi 使用其 SDK credential store 或 provider 原生环境变量
 ```

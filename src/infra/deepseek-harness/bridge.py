@@ -139,6 +139,9 @@ def _start_harness(config: dict[str, Any]) -> Any:
     reasoning_effort = config.get("reasoningEffort")
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
+    patches = config.get("patches")
+    if patches is not None:
+        kwargs["patches"] = tuple(str(patch) for patch in patches)
 
     harness = DeepSeekHarness(**kwargs)
     harness.start()

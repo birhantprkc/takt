@@ -120,7 +120,7 @@ The managed environment uses uv-managed CPython 3.12 and the fixed SDK/runtime v
 
 If package-index access was previously configured with `pip`, migrate to uv's standard `UV_INDEX_URL`, proxy, and certificate environment variables; `uv sync --locked` uses the shipped lock as the dependency source.
 
-The install `--python` option and provider `python_path` option have been removed because the managed environment is the only supported interpreter. Set `DEEPSEEK_API_KEY` and optionally `DEEPSEEK_BASE_URL` in the environment. This provider is a developer-preview compatibility surface; use the opt-in live smoke procedure in the configuration guide before relying on a new SDK/runtime pair.
+The install `--python` option and provider `python_path` option have been removed because the managed environment is the only supported interpreter. Credentials resolve through the official DeepSeek Harness credential store (`$DSH_HOME/.credentials.yaml`, default `~/.dsh/.credentials.yaml`) or through an exported variable for the selected reference such as `DEEPSEEK_API_KEY`; TAKT never reads or rewrites the stored credential. This provider is a developer-preview compatibility surface; use the opt-in live smoke procedure in the configuration guide before relying on a new SDK/runtime pair.
 
 These providers require an external CLI:
 

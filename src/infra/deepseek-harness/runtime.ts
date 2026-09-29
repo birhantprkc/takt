@@ -45,6 +45,7 @@ base_probe_kwargs = {
     'max_tokens': None,
     'request_timeout_seconds': 1.0,
     'shutdown_timeout_seconds': 1.0,
+    'patches': (),
 }
 for reasoning_effort in (None, 'off', 'low', 'high', 'max'):
     probe_kwargs = dict(base_probe_kwargs)

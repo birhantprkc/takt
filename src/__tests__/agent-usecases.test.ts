@@ -1,3 +1,4 @@
+import { buildDecomposePrompt, buildMorePartsPrompt } from '../agents/team-leader-structured-output.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAgent } from '../agents/runner.js';
 import { parseParts } from '../core/workflow/engine/task-decomposer.js';
@@ -16,6 +17,7 @@ import {
 import type { AgentResponse, CompanionFinding } from '../core/models/index.js';
 import { runTagJudgeStage as runTagJudgeStageImpl } from '../agents/judge-status-usecase.js';
 import { requestDecompositionRawResponse as requestDecompositionRawResponseImpl } from '../agents/decompose-task-usecase.js';
+import { RuleDetectionExhaustedError } from '../core/workflow/evaluation/RuleDetectionExhaustedError.js';
 import { loadEvaluationSchema, loadJudgmentSchema } from '../infra/resources/schema-loader.js';
 import { OpenCodeProvider } from '../infra/providers/opencode.js';
 import {
@@ -546,6 +548,71 @@ describe('agent-usecases', () => {
     expect(runAgent).toHaveBeenCalledTimes(3);
   });
 
+  it('judgeStatus は Stage 1 と Stage 2 の provider rejection 後に Stage 3 を実行し、判定できなければ RuleDetectionExhaustedError を送出する', async () => {
+    const onJudgeStage = vi.fn();
+    vi.mocked(runAgent)
+      .mockRejectedValueOnce(new Error('stage 1 rejected'))
+      .mockRejectedValueOnce(new Error('stage 2 rejected'))
+      .mockResolvedValueOnce(doneResponse('still no match'));
+    vi.mocked(detectJudgeIndex).mockReturnValue(-1);
+
+    await expect(judgeStatus('structured', 'tag', [
+      { label: 'a' },
+      { label: 'b' },
+    ], {
+      ...judgeOptions,
+      onJudgeStage,
+    })).rejects.toBeInstanceOf(RuleDetectionExhaustedError);
+
+    expect(runAgent).toHaveBeenCalledTimes(3);
+    expect(onJudgeStage).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      stage: 1,
+      status: 'error',
+      response: 'stage 1 rejected',
+    }));
+    expect(onJudgeStage).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      stage: 2,
+      status: 'error',
+      response: 'stage 2 rejected',
+    }));
+  });
+
+  it.each(['error', 'done'] as const)(
+    'judgeStatus は Stage 2 の %s 記録が失敗したら例外を伝播し Stage 3 を呼ばない',
+    async (stage2Status) => {
+      const recordingError = new Error('stage 2 log write failed');
+      const onJudgeStage = vi.fn((entry: JudgeStageLog) => {
+        if (entry.stage === 2) {
+          throw recordingError;
+        }
+      });
+      vi.mocked(runAgent)
+        .mockResolvedValue(doneResponse('ignored', { matched_index: 2, reason: 'second condition' }))
+        .mockResolvedValueOnce(doneResponse('no match'));
+      if (stage2Status === 'error') {
+        vi.mocked(runAgent).mockRejectedValueOnce(new Error('stage 2 rejected'));
+      } else {
+        vi.mocked(runAgent).mockResolvedValueOnce(doneResponse('[REVIEW:1]'));
+      }
+
+      await expect(judgeStatus('structured', 'tag', [
+        { label: 'a' },
+        { label: 'b' },
+      ], {
+        ...judgeOptions,
+        onJudgeStage,
+      })).rejects.toBe(recordingError);
+
+      expect(runAgent).toHaveBeenCalledTimes(2);
+      expect(onJudgeStage).toHaveBeenCalledTimes(2);
+      expect(onJudgeStage).toHaveBeenLastCalledWith(expect.objectContaining({
+        stage: 2,
+        method: 'phase3_tag',
+        status: stage2Status,
+      }));
+    },
+  );
+
   it('judgeStatus は ai_judge fallback の活動中に親 deadline を生存させる', async () => {
     vi.useFakeTimers();
     const inactivityTimeoutMs = 60_000;
@@ -738,6 +805,34 @@ describe('agent-usecases', () => {
       }
     },
   );
+
+  it('judgeStatus は Stage 2 の provider rejection 中に発生した abort を伝播する', async () => {
+    const abortController = new AbortController();
+    const onJudgeStage = vi.fn();
+    vi.mocked(runAgent)
+      .mockResolvedValueOnce(doneResponse('no structured match'))
+      .mockImplementationOnce(async () => {
+        abortController.abort(new Error('cancelled during stage 2'));
+        throw new Error('stage 2 rejected');
+      });
+
+    await expect(judgeStatus('structured', 'tag', [
+      { label: 'a' },
+      { label: 'b' },
+    ], {
+      ...judgeOptions,
+      abortSignal: abortController.signal,
+      onJudgeStage,
+    })).rejects.toThrow('cancelled during stage 2');
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(onJudgeStage).toHaveBeenCalledTimes(2);
+    expect(onJudgeStage).toHaveBeenLastCalledWith(expect.objectContaining({
+      stage: 2,
+      status: 'error',
+      response: 'stage 2 rejected',
+    }));
+  });
 
   it('judgeStatus は provider 分岐なしで全内部ステージに暗黙の maxTurns を付与しない', async () => {
     vi.mocked(runAgent).mockResolvedValueOnce(doneResponse('no match'));
@@ -985,8 +1080,13 @@ describe('agent-usecases', () => {
     });
 
     const [, prompt, callOptions] = vi.mocked(runAgent).mock.calls[0] ?? [];
-    expect(prompt).toContain('You may use read-only inspection tools only');
-    expect(prompt).not.toContain('Do not use any tool');
+    expect(prompt).toBe(buildDecomposePrompt('instruction', {
+      maxInitialParts: 3,
+      language: undefined,
+      inspectTools: undefined,
+      inspectGuidance: true,
+      rejectedDecomposition: undefined,
+    }));
     expect(callOptions).not.toHaveProperty('allowedTools');
   });
 
@@ -1044,7 +1144,7 @@ describe('agent-usecases', () => {
     });
 
     await expect(decomposeTask('instruction', 2, { cwd: '/repo' }))
-      .rejects.toThrow('Team leader failed: bad output');
+      .rejects.toThrow("bad output");
   });
 
   it('decomposeTask は onPromptResolved を runAgent に伝搬する', async () => {
@@ -1384,9 +1484,11 @@ describe('agent-usecases', () => {
       allowedTools: ['Read', 'Glob', 'Grep'],
     }));
     expect(vi.mocked(runAgent).mock.calls[0]?.[2]).not.toHaveProperty('permissionMode');
-    expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toContain(
-      'You may use read-only inspection tools only',
-    );
+    expect(vi.mocked(runAgent).mock.calls[0]?.[1]).toBe(buildMorePartsPrompt(
+      'original instruction',
+      [{ id: 'p1', title: 'Part 1', status: 'done', content: 'done' }],
+      ['p1'], undefined, [], ['Read', 'Glob', 'Grep'],
+    ));
   });
 
   it('requestMoreParts は inspectGuidance を feedback prompt へ伝搬する', async () => {
@@ -1410,8 +1512,11 @@ describe('agent-usecases', () => {
     );
 
     const [, prompt, callOptions] = vi.mocked(runAgent).mock.calls[0] ?? [];
-    expect(prompt).toContain('You may use read-only inspection tools only');
-    expect(prompt).not.toContain('Do not use any tool');
+    expect(prompt).toBe(buildMorePartsPrompt(
+      'original instruction',
+      [{ id: 'p1', title: 'Part 1', status: 'done', content: 'done' }],
+      ['p1'], undefined, [], undefined, true,
+    ));
     expect(callOptions).not.toHaveProperty('allowedTools');
   });
 
@@ -1429,7 +1534,7 @@ describe('agent-usecases', () => {
       [{ id: 'p1', title: 'Part 1', status: 'done', content: 'ok' }],
       ['p1'],
       { cwd: '/repo', persona: 'team-leader', cancellablePartIds: [] },
-    )).rejects.toThrow('Team leader feedback failed: timeout');
+    )).rejects.toThrow("timeout");
   });
 
   it('requestMoreParts は AbortSignal と provider usage を呼び出し境界へ伝搬する', async () => {

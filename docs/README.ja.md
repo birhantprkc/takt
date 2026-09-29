@@ -120,7 +120,7 @@ managed environment は uv-managed CPython 3.12 と、同梱の `pyproject.toml`
 
 以前 `pip` で package index を設定していた場合は、uv 標準の `UV_INDEX_URL`、proxy、certificate 環境変数へ移行してください。`uv sync --locked` は同梱 lock を依存関係の正本として使います。
 
-install の `--python` オプションと provider の `python_path` オプションは、managed environment だけを使用する契約のため削除されています。`DEEPSEEK_API_KEY` と、任意で `DEEPSEEK_BASE_URL` を環境変数に設定します。この provider は developer preview の互換性境界であり、新しい SDK/runtime の組み合わせを使う前に configuration guide の opt-in live smoke を実行してください。
+install の `--python` オプションと provider の `python_path` オプションは、managed environment だけを使用する契約のため削除されています。credential は公式 DeepSeek Harness credential store（`$DSH_HOME/.credentials.yaml`、既定は `~/.dsh/.credentials.yaml`）または選択された参照（`DEEPSEEK_API_KEY` など）の環境変数から解決され、TAKT が保存済み credential を読み取・再保存することはありません。この provider は developer preview の互換性境界であり、新しい SDK/runtime の組み合わせを使う前に configuration guide の opt-in live smoke を実行してください。
 
 次のプロバイダーを使う場合は外部 CLI のインストールが必要です:
 

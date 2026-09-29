@@ -1837,12 +1837,13 @@ export class OpenCodeAttemptRunner {
       // model that never emits the StructuredOutput tool ("did not produce
       // structured output"), or a gateway/model that rejects the json_schema
       // response format outright (surfaced as an upstream request error).
+      // shouldDegradeToFormatless owns this classification.
       // These fall back to formatless structured output in a fresh session —
       // resuming the same session would let the model keep "remembering" the
       // native tool it just failed to use. Generic transient errors
       // (transport/network) must not trigger this, or they would burn the
       // one-shot fallback budget before a real format failure arrives.
-      if (shouldDegradeToFormatless(callState.recoveryState, message)) {
+      if (shouldDegradeToFormatless(callState.recoveryState, message, toolGuardFailure !== undefined)) {
         throwIfCallAborted();
         callState.recoveryState = degradeToFormatless(callState.recoveryState);
         callState.maxAttempts = Math.max(callState.maxAttempts, attempt + 1);
