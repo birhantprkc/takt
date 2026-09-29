@@ -538,7 +538,7 @@ export async function runAssistantRetryCommand(
     }
 
     if (selectedTask.kind === 'exceeded') {
-      return requeueExceededTask(selectedTask, options);
+      return await requeueExceededTask(selectedTask, options);
     }
     return options.command === 'requeue'
       ? await requeueFailedTask(selectedTask, options, options.cwd)

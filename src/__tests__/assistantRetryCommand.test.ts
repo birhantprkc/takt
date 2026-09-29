@@ -553,6 +553,19 @@ describe('runAssistantRetryCommand', () => {
     expect(mocks.persistFailedTaskRetry).not.toHaveBeenCalled();
   });
 
+  it('returns a notice when an exceeded task cannot be requeued after confirmation', async () => {
+    mocks.listAllTaskItems.mockReturnValue([exceededTask]);
+    mocks.confirm.mockResolvedValue(true);
+    mocks.requeueExceededTask.mockImplementationOnce(() => {
+      throw new Error('Task not found: long-running-task (exceeded)');
+    });
+
+    const notice = await runAssistantRetryCommand({ ...options, command: 'requeue' });
+
+    expect(notice).toContain('could not be prepared');
+    expect(notice).toContain('Task not found: long-running-task (exceeded)');
+  });
+
   it.each([
     { field: 'saved stopping position', startStep: 'review-tests', iteration: 8 },
     { field: 'iteration', startStep: 'review', iteration: 9 },
