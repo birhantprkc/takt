@@ -30,6 +30,7 @@ import {
   denormalizeRateLimitFallback,
   normalizeTelemetryConfig,
   denormalizeTelemetryConfig,
+  denormalizeCacciaConfig,
 } from '../configNormalizers.js';
 import {
   resolveAliasedPreviewCount,
@@ -314,12 +315,8 @@ export function saveProjectConfig(projectDir: string, config: ProjectConfig): vo
     if (Object.keys(pr).length > 0) savePayload.pipeline = pr;
   }
   delete savePayload.caccia;
-  if (config.caccia) {
-    const rawCaccia: Record<string, unknown> = {};
-    if (config.caccia.enabled !== undefined) rawCaccia.enabled = config.caccia.enabled;
-    if (config.caccia.waitTimeoutMs !== undefined) rawCaccia.wait_timeout_ms = config.caccia.waitTimeoutMs;
-    if (config.caccia.maxIterations !== undefined) rawCaccia.max_iterations = config.caccia.maxIterations;
-    if (config.caccia.workflow !== undefined) rawCaccia.workflow = config.caccia.workflow;
+  const rawCaccia = denormalizeCacciaConfig(config.caccia);
+  if (rawCaccia !== undefined) {
     savePayload.caccia = rawCaccia;
   }
   const rawPersonaProviders = denormalizePersonaProviders(config.personaProviders);

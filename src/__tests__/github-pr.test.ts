@@ -12,9 +12,12 @@ import {
 } from '../infra/github/pr.js';
 
 const execFileSync = vi.hoisted(() => vi.fn());
+const execFile = vi.hoisted(() => vi.fn());
+const asyncCommandResponses = vi.hoisted(() => [] as Array<string | Error>);
 const checkGhCli = vi.hoisted(() => vi.fn(() => ({ available: true })));
 
 vi.mock('node:child_process', () => ({
+  execFile: (...args: unknown[]) => execFile(...args),
   execFileSync: (...args: unknown[]) => execFileSync(...args),
 }));
 vi.mock('../infra/github/issue.js', () => ({ checkGhCli }));
@@ -24,10 +27,43 @@ vi.mock('../shared/utils/index.js', async (importOriginal) => ({
   getErrorMessage: (error: unknown) => String(error),
 }));
 
+function queueAsyncGhResponses(...responses: Array<unknown | Error>): void {
+  asyncCommandResponses.push(...responses.map((response) => (
+    response instanceof Error ? response : JSON.stringify(response)
+  )));
+}
+
 describe('GitHub PR command boundary', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    asyncCommandResponses.splice(0);
+    execFile.mockReset();
     execFileSync.mockReset();
+    execFile.mockImplementation((
+      _command: string,
+      _args: string[],
+      rawOptions: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const response = asyncCommandResponses.shift();
+      const options = rawOptions as { maxBuffer?: number };
+      queueMicrotask(() => {
+        if (response instanceof Error) {
+          callback(response, '', '');
+        } else {
+          const stdout = response ?? '';
+          const maxBuffer = options.maxBuffer ?? 1024 * 1024;
+          if (Buffer.byteLength(stdout, 'utf8') > maxBuffer) {
+            callback(Object.assign(new Error('stdout maxBuffer length exceeded'), {
+              code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+            }), '', '');
+          } else {
+            callback(null, stdout, '');
+          }
+        }
+      });
+      return {};
+    });
     checkGhCli.mockReturnValue({ available: true });
   });
 
@@ -279,13 +315,13 @@ describe('GitHub PR command boundary', () => {
     expect(() => resolveReviewThread('thread-42', '/project')).toThrow(/thread resolve denied/u);
   });
 
-  it('reports CodeRabbit review completion only for the exact reviewed commit SHA', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('reports CodeRabbit review completion only for the exact reviewed commit SHA', async () => {
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -301,8 +337,8 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -313,25 +349,44 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }));
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              comments: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+      },
+    );
 
-    expect(fetchCodeRabbitReviewStatus(7, '/project')).toEqual({
+    await expect(fetchCodeRabbitReviewStatus(7, '/project')).resolves.toEqual({
       headSha: 'head-7',
       hasCodeRabbitPost: true,
       reviewedHeadShas: ['head-7'],
     });
-    for (const [, , options] of execFileSync.mock.calls) {
+    for (const [, , options] of execFile.mock.calls) {
       expect(options).not.toHaveProperty('timeout');
       expect(options).not.toHaveProperty('killSignal');
+      expect(options).not.toHaveProperty('signal');
     }
   });
 
-  it('uses the remaining absolute deadline for every status page and kills timed out gh processes', () => {
+  it('uses the remaining absolute deadline for every status page and kills timed out gh processes', async () => {
     let now = 10_000;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
-    const timeSpentByCall = [100, 200, 100, 250, 0];
+    const timeSpentByCall = [100, 200, 100, 250, 100, 0];
     let callNumber = 0;
-    execFileSync.mockImplementation((_command: string, rawArgs: unknown, rawOptions: unknown) => {
+    execFile.mockImplementation((
+      _command: string,
+      rawArgs: unknown,
+      rawOptions: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
       const args = rawArgs as string[];
       const options = rawOptions as { timeout?: number; killSignal?: string };
       const callIndex = callNumber;
@@ -351,6 +406,19 @@ describe('GitHub PR command boundary', () => {
                   pageInfo: cursor === undefined
                     ? { hasNextPage: true, endCursor: 'thread-cursor' }
                     : { hasNextPage: false, endCursor: null },
+                  nodes: [],
+                },
+              },
+            },
+          },
+        };
+      } else if (query?.includes('comments(first:100')) {
+        response = {
+          data: {
+            repository: {
+              pullRequest: {
+                comments: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
                   nodes: [],
                 },
               },
@@ -382,32 +450,33 @@ describe('GitHub PR command boundary', () => {
       }
 
       now += timeSpentByCall[callIndex] ?? 0;
-      return JSON.stringify(response);
+      callback(null, JSON.stringify(response), '');
+      return {};
     });
 
     try {
-      expect(fetchCodeRabbitReviewStatus(7, '/project', 11_000)).toEqual({
+      await expect(fetchCodeRabbitReviewStatus(7, '/project', 11_000)).resolves.toEqual({
         headSha: 'head-7',
         hasCodeRabbitPost: true,
         reviewedHeadShas: ['head-7'],
       });
-      const options = execFileSync.mock.calls.map(([, , rawOptions]) =>
+      const options = execFile.mock.calls.map(([, , rawOptions]) =>
         rawOptions as { timeout?: number; killSignal?: string },
       );
-      expect(options.map(({ timeout }) => timeout)).toEqual([1_000, 900, 700, 600, 350]);
-      expect(options.map(({ killSignal }) => killSignal)).toEqual(Array(5).fill('SIGKILL'));
+      expect(options.map(({ timeout }) => timeout)).toEqual([1_000, 900, 700, 600, 350, 250]);
+      expect(options.map(({ killSignal }) => killSignal)).toEqual(Array(6).fill('SIGKILL'));
     } finally {
       nowSpy.mockRestore();
     }
   });
 
-  it('returns no partial status when a later page reaches the deadline', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('returns no partial status when a later page reaches the deadline', async () => {
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -423,37 +492,117 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }))
-      .mockImplementationOnce(() => {
-        throw Object.assign(new Error('spawnSync gh ETIMEDOUT'), { code: 'ETIMEDOUT' });
-      });
+      },
+      Object.assign(new Error('spawn gh process timed out'), { killed: true, signal: 'SIGKILL' }),
+    );
 
-    expect(fetchCodeRabbitReviewStatus(7, '/project', Date.now() + 1_000)).toBeUndefined();
-    expect(execFileSync).toHaveBeenCalledTimes(3);
-    expect(execFileSync.mock.calls[2]?.[2]).toMatchObject({
+    await expect(fetchCodeRabbitReviewStatus(7, '/project', Date.now() + 1_000)).resolves.toBeUndefined();
+    expect(execFile).toHaveBeenCalledTimes(3);
+    expect(execFile.mock.calls[2]?.[2]).toMatchObject({
       killSignal: 'SIGKILL',
       timeout: expect.any(Number),
     });
   });
 
-  it('does not convert GraphQL failures into a missing review status', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('does not convert GraphQL failures into a missing review status', async () => {
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({ errors: [{ message: 'GraphQL authentication failed' }] }));
+      },
+      { errors: [{ message: 'GraphQL authentication failed' }] },
+    );
 
-    expect(() => fetchCodeRabbitReviewStatus(7, '/project', Date.now() + 1_000))
-      .toThrow('GraphQL authentication failed');
-    expect(execFileSync).toHaveBeenCalledTimes(2);
+    await expect(fetchCodeRabbitReviewStatus(7, '/project', Date.now() + 1_000))
+      .rejects.toThrow('GraphQL authentication failed');
+    expect(execFile).toHaveBeenCalledTimes(2);
   });
 
-  it('does not start status retrieval after the absolute deadline', () => {
+  it('uses CodeRabbit issue-comment coverage when a review event is absent and the comment page exceeds the default output limit', async () => {
+    const coverageMarker = '<!-- final_review_risk_coverage:{"sourceCommitId":"head-7","coveredCommitId":"head-7","kind":"reviewed"} -->';
+    const comments = Array.from({ length: 100 }, (_, index) => ({
+      author: { login: index === 99 ? 'coderabbitai' : 'reviewer' },
+      body: `${'x'.repeat(11_847 - (index === 99 ? coverageMarker.length : 0))}${index === 99 ? coverageMarker : ''}`,
+    }));
+    const commentsResponse = {
+      data: {
+        repository: {
+          pullRequest: {
+            comments: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: comments,
+            },
+          },
+        },
+      },
+    };
+    expect(Buffer.byteLength(JSON.stringify(commentsResponse), 'utf8')).toBeGreaterThan(1024 * 1024);
+
+    queueAsyncGhResponses(
+      {
+        url: 'https://github.com/org/repo/pull/7',
+        headRefOid: 'head-7',
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              reviews: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+      },
+      commentsResponse,
+    );
+
+    await expect(fetchCodeRabbitReviewStatus(7, '/project')).resolves.toEqual({
+      headSha: 'head-7',
+      hasCodeRabbitPost: true,
+      reviewedHeadShas: ['head-7'],
+    });
+    const commentsCall = execFile.mock.calls.find(([, args]) =>
+      (args as string[]).some((arg) => arg.includes('comments(first:100')),
+    );
+    expect(commentsCall?.[2]).toMatchObject({ maxBuffer: 64 * 1024 * 1024 });
+  });
+
+  it('passes an abort signal to each asynchronous gh request', async () => {
+    const abortController = new AbortController();
+    queueAsyncGhResponses(
+      { url: 'https://github.com/org/repo/pull/7', headRefOid: 'head-7' },
+      { data: { repository: { pullRequest: { reviews: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } },
+      { data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } },
+      { data: { repository: { pullRequest: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } },
+    );
+
+    await fetchCodeRabbitReviewStatus(7, '/project', Date.now() + 1_000, abortController.signal);
+
+    expect(execFile.mock.calls).toHaveLength(4);
+    for (const [, , options] of execFile.mock.calls) {
+      expect(options).toMatchObject({ signal: abortController.signal });
+    }
+  });
+
+  it('does not start status retrieval after the absolute deadline', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(11_000);
     try {
-      expect(fetchCodeRabbitReviewStatus(7, '/project', 11_000)).toBeUndefined();
-      expect(execFileSync).not.toHaveBeenCalled();
+      await expect(fetchCodeRabbitReviewStatus(7, '/project', 11_000)).resolves.toBeUndefined();
+      expect(execFile).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
     }
@@ -486,13 +635,13 @@ describe('GitHub PR command boundary', () => {
     });
   });
 
-  it('does not treat a dismissed CodeRabbit review as a completed review', () => {
-    execFileSync
-      .mockReturnValueOnce(JSON.stringify({
+  it('does not treat a dismissed CodeRabbit review as a completed review', async () => {
+    queueAsyncGhResponses(
+      {
         url: 'https://github.com/org/repo/pull/7',
         headRefOid: 'head-7',
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -508,8 +657,8 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }))
-      .mockReturnValueOnce(JSON.stringify({
+      },
+      {
         data: {
           repository: {
             pullRequest: {
@@ -520,9 +669,22 @@ describe('GitHub PR command boundary', () => {
             },
           },
         },
-      }));
+      },
+      {
+        data: {
+          repository: {
+            pullRequest: {
+              comments: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: [],
+              },
+            },
+          },
+        },
+      },
+    );
 
-    expect(fetchCodeRabbitReviewStatus(7, '/project')).toEqual({
+    await expect(fetchCodeRabbitReviewStatus(7, '/project')).resolves.toEqual({
       headSha: 'head-7',
       hasCodeRabbitPost: false,
       reviewedHeadShas: [],

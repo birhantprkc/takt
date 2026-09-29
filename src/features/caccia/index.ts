@@ -172,11 +172,22 @@ async function waitForCodeRabbitReview(
     if (deadline - Date.now() <= 0) {
       return undefined;
     }
-    const status = fetchCodeRabbitReviewStatus(prNumber, projectCwd, deadline);
+    let status: Awaited<ReturnType<typeof fetchCodeRabbitReviewStatus>>;
+    try {
+      status = await fetchCodeRabbitReviewStatus(prNumber, projectCwd, deadline, signal);
+    } catch (error) {
+      assertNotAborted(signal);
+      throw error;
+    }
+    assertNotAborted(signal);
     if (status === undefined || deadline - Date.now() <= 0) {
       return undefined;
     }
-    if (options.afterHeadSha === undefined && status.hasCodeRabbitPost) {
+    if (
+      options.afterHeadSha === undefined
+      && status.hasCodeRabbitPost
+      && status.reviewedHeadShas.includes(status.headSha)
+    ) {
       return { headSha: status.headSha };
     }
     if (
