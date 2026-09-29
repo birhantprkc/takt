@@ -23,6 +23,7 @@ import type { ImageAttachmentReference } from '../../shared/types/image-attachme
 import type { StreamCallback } from '../../shared/types/provider.js';
 import { getErrorMessage } from '../../shared/utils/index.js';
 import {
+  cleanupFormalSpecVerificationArtifacts,
   runFormalSpecVerification,
 } from './formalSpecVerification.js';
 import {
@@ -30,6 +31,7 @@ import {
   buildFormalSpecGenerationSystemPrompt,
   buildFormalSpecInterpretationPrompt,
   buildFormalSpecInterpretationSystemPrompt,
+  getFormalSpecVerificationArtifactPaths,
 } from './formalSpecPrompts.js';
 
 export interface ConversationSessionStrategy {
@@ -488,89 +490,95 @@ export function createConversationSession(options: ConversationSessionOptions): 
       }
       return { kind: 'error', message: getErrorMessage(error) };
     }
-    if (!isCurrentTurn()) {
-      return interrupted();
-    }
-    const generationSessionId = generation.sessionId ?? generation.result.sessionId;
-    if (!verification.verificationStarted) {
+    try {
+      if (!isCurrentTurn()) {
+        return interrupted();
+      }
+      const generationSessionId = generation.sessionId ?? generation.result.sessionId;
+      if (!verification.verificationStarted) {
+        consumeHandoffHistory(generationPrompt.handoffHistory);
+        shouldSendInitialPromptContext = false;
+        history = [...history, { role: 'assistant', content: generation.result.content }];
+        sessionId = generationSessionId;
+        if (options.persistSession !== false && generationSessionId !== undefined) {
+          updatePersonaSession(options.cwd, ctx.personaName, generationSessionId, ctx.providerType);
+        }
+        return {
+          kind: 'error',
+          message: verification.message ?? 'Formal specification verification failed.',
+        };
+      }
+
+      const interpretationPrompt = buildFormalSpecInterpretationPrompt(
+        verification,
+        generation.result.content,
+        ctx.lang,
+      );
+      let interpretationImageAttachments;
+      try {
+        interpretationImageAttachments = options.resolveImageAttachments?.(interpretationPrompt);
+      } catch (error) {
+        return { kind: 'error', code: 'provider_error', message: getErrorMessage(error) };
+      }
+
+      const interpretation = await callAIWithRetry(
+        interpretationPrompt,
+        buildFormalSpecInterpretationSystemPrompt(ctx.lang),
+        ['Read'],
+        options.cwd,
+        { ...ctx, sessionId: generationSessionId, disableSessionRetry: true },
+        {
+          outputMode: options.outputMode,
+          abortSignal: input.abortSignal,
+          onStream: input.onStream ?? options.onStream,
+          persistSession: false,
+          permissionMode: 'readonly',
+          internalAgentIsolation: 'strict-readonly',
+          allowReadonlyFileRead: true,
+          readonlyFileReadPaths: getFormalSpecVerificationArtifactPaths(verification),
+          imageAttachments: interpretationImageAttachments,
+          ...(input.onNotice ? { onNotice: input.onNotice } : {}),
+        },
+      );
+      if (!isCurrentTurn()) {
+        return interrupted();
+      }
+
+      if (!interpretation.result) {
+        return interpretation.error === undefined
+          ? { kind: 'error', code: 'empty_ai_response', message: 'AI response was empty' }
+          : { kind: 'error', code: 'provider_error', message: interpretation.error };
+      }
+      if (!interpretation.result.success) {
+        return { kind: 'error', code: 'provider_error', message: interpretation.result.content };
+      }
+      if (!isCurrentTurn()) {
+        return interrupted();
+      }
+
+      const finalSessionId = interpretation.sessionId
+        ?? interpretation.result.sessionId
+        ?? generationSessionId;
       consumeHandoffHistory(generationPrompt.handoffHistory);
       shouldSendInitialPromptContext = false;
-      history = [...history, { role: 'assistant', content: generation.result.content }];
-      sessionId = generationSessionId;
-      if (options.persistSession !== false && generationSessionId !== undefined) {
-        updatePersonaSession(options.cwd, ctx.personaName, generationSessionId, ctx.providerType);
+      history = [
+        ...history,
+        { role: 'assistant', content: generation.result.content },
+        { role: 'assistant', content: interpretation.result.content },
+      ];
+      sessionId = finalSessionId;
+      if (options.persistSession !== false && finalSessionId !== undefined) {
+        updatePersonaSession(options.cwd, ctx.personaName, finalSessionId, ctx.providerType);
       }
+
       return {
-        kind: 'error',
-        message: verification.message ?? 'Formal specification verification failed.',
+        kind: 'assistant_response',
+        content: `${generation.result.content}\n\n${interpretation.result.content}`,
+        ...(finalSessionId === undefined ? {} : { sessionId: finalSessionId }),
       };
+    } finally {
+      cleanupFormalSpecVerificationArtifacts(verification);
     }
-
-    const interpretationPrompt = buildFormalSpecInterpretationPrompt(
-      verification,
-      generation.result.content,
-      ctx.lang,
-    );
-    let interpretationImageAttachments;
-    try {
-      interpretationImageAttachments = options.resolveImageAttachments?.(interpretationPrompt);
-    } catch (error) {
-      return { kind: 'error', code: 'provider_error', message: getErrorMessage(error) };
-    }
-
-    const interpretation = await callAIWithRetry(
-      interpretationPrompt,
-      buildFormalSpecInterpretationSystemPrompt(ctx.lang),
-      [],
-      options.cwd,
-      { ...ctx, sessionId: generationSessionId, disableSessionRetry: true },
-      {
-        outputMode: options.outputMode,
-        abortSignal: input.abortSignal,
-        onStream: input.onStream ?? options.onStream,
-        persistSession: false,
-        permissionMode: 'readonly',
-        internalAgentIsolation: 'strict-readonly',
-        imageAttachments: interpretationImageAttachments,
-        ...(input.onNotice ? { onNotice: input.onNotice } : {}),
-      },
-    );
-    if (!isCurrentTurn()) {
-      return interrupted();
-    }
-
-    if (!interpretation.result) {
-      return interpretation.error === undefined
-        ? { kind: 'error', code: 'empty_ai_response', message: 'AI response was empty' }
-        : { kind: 'error', code: 'provider_error', message: interpretation.error };
-    }
-    if (!interpretation.result.success) {
-      return { kind: 'error', code: 'provider_error', message: interpretation.result.content };
-    }
-    if (!isCurrentTurn()) {
-      return interrupted();
-    }
-
-    const finalSessionId = interpretation.sessionId
-      ?? interpretation.result.sessionId
-      ?? generationSessionId;
-    consumeHandoffHistory(generationPrompt.handoffHistory);
-    shouldSendInitialPromptContext = false;
-    history = [
-      ...history,
-      { role: 'assistant', content: generation.result.content },
-      { role: 'assistant', content: interpretation.result.content },
-    ];
-    sessionId = finalSessionId;
-    if (options.persistSession !== false && finalSessionId !== undefined) {
-      updatePersonaSession(options.cwd, ctx.personaName, finalSessionId, ctx.providerType);
-    }
-
-    return {
-      kind: 'assistant_response',
-      content: `${generation.result.content}\n\n${interpretation.result.content}`,
-      ...(finalSessionId === undefined ? {} : { sessionId: finalSessionId }),
-    };
   }
 
   async function handleGoCommand(

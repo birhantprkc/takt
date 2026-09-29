@@ -56,6 +56,7 @@ import {
 } from './imageAttachments.js';
 import type { InteractiveImageAttachment } from './imageAttachments.js';
 import {
+  cleanupFormalSpecVerificationArtifacts,
   runFormalSpecVerification,
 } from './formalSpecVerification.js';
 import {
@@ -63,6 +64,7 @@ import {
   buildFormalSpecGenerationSystemPrompt,
   buildFormalSpecInterpretationPrompt,
   buildFormalSpecInterpretationSystemPrompt,
+  getFormalSpecVerificationArtifactPaths,
 } from './formalSpecPrompts.js';
 
 export { type CallAIResult, type SessionContext, callAIWithRetry } from './aiCaller.js';
@@ -271,6 +273,8 @@ export async function runConversationLoop(
       callOptions: {
         permissionMode?: PermissionMode;
         internalAgentIsolation?: InternalAgentIsolation;
+        allowReadonlyFileRead?: boolean;
+        readonlyFileReadPaths?: string[];
         disableSessionRetry?: boolean;
         persistSession?: boolean;
         commitSession?: boolean;
@@ -303,6 +307,10 @@ export async function runConversationLoop(
           ...(callOptions.internalAgentIsolation === undefined
             ? {}
             : { internalAgentIsolation: callOptions.internalAgentIsolation }),
+          ...(callOptions.allowReadonlyFileRead ? { allowReadonlyFileRead: true } : {}),
+          ...(callOptions.readonlyFileReadPaths === undefined
+            ? {}
+            : { readonlyFileReadPaths: callOptions.readonlyFileReadPaths }),
           ...(callOptions.persistSession === undefined ? {} : { persistSession: callOptions.persistSession }),
         },
       );
@@ -418,51 +426,57 @@ export async function runConversationLoop(
       } finally {
         process.removeListener('SIGINT', abortVerification);
       }
-      if (!verification.verificationStarted) {
-        sessionId = generationCall.sessionId;
+      try {
+        if (!verification.verificationStarted) {
+          sessionId = generationCall.sessionId;
+          if (sessionId !== undefined) {
+            updatePersonaSession(cwd, ctx.personaName, sessionId, ctx.providerType);
+          }
+          shouldSendInitialPromptContext = false;
+          history.push({ role: 'assistant', content: generated.content });
+          info(verification.message ?? 'Formal specification verification failed.');
+          blankLine();
+          return;
+        }
+
+        const interpretationCall = await callConversationAI(
+          buildFormalSpecInterpretationPrompt(verification, generated.content, ctx.lang),
+          buildFormalSpecInterpretationSystemPrompt(ctx.lang),
+          ['Read'],
+          {
+            permissionMode: 'readonly',
+            internalAgentIsolation: 'strict-readonly',
+            allowReadonlyFileRead: true,
+            readonlyFileReadPaths: getFormalSpecVerificationArtifactPaths(verification),
+            disableSessionRetry: true,
+            persistSession: false,
+            commitSession: false,
+          },
+          generationCall.sessionId,
+        );
+        const interpreted = interpretationCall.result;
+        if (!interpreted) {
+          return;
+        }
+        if (!interpreted.success) {
+          error(interpreted.content);
+          blankLine();
+          return;
+        }
+
+        sessionId = interpretationCall.sessionId ?? generationCall.sessionId;
         if (sessionId !== undefined) {
           updatePersonaSession(cwd, ctx.personaName, sessionId, ctx.providerType);
         }
         shouldSendInitialPromptContext = false;
-        history.push({ role: 'assistant', content: generated.content });
-        info(verification.message ?? 'Formal specification verification failed.');
+        history.push(
+          { role: 'assistant', content: generated.content },
+          { role: 'assistant', content: interpreted.content },
+        );
         blankLine();
-        return;
+      } finally {
+        cleanupFormalSpecVerificationArtifacts(verification);
       }
-
-      const interpretationCall = await callConversationAI(
-        buildFormalSpecInterpretationPrompt(verification, generated.content, ctx.lang),
-        buildFormalSpecInterpretationSystemPrompt(ctx.lang),
-        [],
-        {
-          permissionMode: 'readonly',
-          internalAgentIsolation: 'strict-readonly',
-          disableSessionRetry: true,
-          persistSession: false,
-          commitSession: false,
-        },
-        generationCall.sessionId,
-      );
-      const interpreted = interpretationCall.result;
-      if (!interpreted) {
-        return;
-      }
-      if (!interpreted.success) {
-        error(interpreted.content);
-        blankLine();
-        return;
-      }
-
-      sessionId = interpretationCall.sessionId ?? generationCall.sessionId;
-      if (sessionId !== undefined) {
-        updatePersonaSession(cwd, ctx.personaName, sessionId, ctx.providerType);
-      }
-      shouldSendInitialPromptContext = false;
-      history.push(
-        { role: 'assistant', content: generated.content },
-        { role: 'assistant', content: interpreted.content },
-      );
-      blankLine();
     }
 
     let commandAvailability: CommandAvailability = resolveFormalSpecCommandAvailability({

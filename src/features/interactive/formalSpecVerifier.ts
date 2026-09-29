@@ -1,15 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
+  openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
   utimesSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -58,6 +62,17 @@ export interface FormalSpecVerificationResult {
   readonly javaMajorVersion?: number;
   readonly quint: FormalSpecQuintResult;
   readonly alloy: FormalSpecAlloyResult;
+  readonly artifacts?: FormalSpecVerificationArtifacts;
+}
+
+export interface FormalSpecVerificationArtifacts {
+  readonly runDirectory: string;
+  readonly specifications: {
+    readonly quint?: string;
+    readonly alloy?: string;
+  };
+  readonly parseJson?: string;
+  readonly logs: Readonly<Record<string, { readonly stdout: string; readonly stderr: string }>>;
 }
 
 export interface FormalSpecVerificationOptions {
@@ -96,7 +111,13 @@ interface ProcessResult {
   readonly stderr: string;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
+  readonly artifactWriteError?: string;
   readonly error?: string;
+}
+
+interface ProcessLogPaths {
+  readonly stdout: string;
+  readonly stderr: string;
 }
 
 interface FenceState {
@@ -327,6 +348,7 @@ async function runProcess(
   cwd: string,
   timeout: number,
   abortSignal?: AbortSignal,
+  logPaths?: ProcessLogPaths,
 ): Promise<ProcessResult> {
   abortSignal?.throwIfAborted();
   const now = new Date();
@@ -337,6 +359,24 @@ async function runProcess(
   let stderr = '';
   let stdoutTruncated = false;
   let stderrTruncated = false;
+  let stdoutLogFd: number | undefined;
+  let stderrLogFd: number | undefined;
+  let artifactWriteError: string | undefined;
+  const closeLogFile = (fileDescriptor: number | undefined): undefined => {
+    if (fileDescriptor === undefined) {
+      return undefined;
+    }
+    try {
+      closeSync(fileDescriptor);
+    } catch (error) {
+      artifactWriteError ??= error instanceof Error ? error.message : String(error);
+    }
+    return undefined;
+  };
+  const closeLogFiles = (): void => {
+    stdoutLogFd = closeLogFile(stdoutLogFd);
+    stderrLogFd = closeLogFile(stderrLogFd);
+  };
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
     processAbortController.abort(new Error(`Process timed out after ${timeout} ms`));
@@ -347,6 +387,15 @@ async function runProcess(
   abortSignal?.addEventListener('abort', onAbort, { once: true });
 
   try {
+    if (logPaths) {
+      try {
+        stdoutLogFd = openSync(logPaths.stdout, 'w', 0o600);
+        stderrLogFd = openSync(logPaths.stderr, 'w', 0o600);
+      } catch (error) {
+        artifactWriteError ??= error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    }
     // A partially spawned process is killed with its tree through the abort
     // contract of spawnManagedProcess.
     const managedProcess = spawnManagedProcess(
@@ -366,20 +415,37 @@ async function runProcess(
     );
     managedProcess.child.stdout?.setEncoding('utf8');
     managedProcess.child.stdout?.on('data', (chunk: string | Buffer) => {
-      const appended = appendProcessOutput(stdout, toProcessText(chunk));
+      const text = toProcessText(chunk);
+      const appended = appendProcessOutput(stdout, text);
       stdout = appended.output;
       stdoutTruncated ||= appended.truncated;
+      if (stdoutLogFd !== undefined) {
+        try {
+          writeLogChunk(stdoutLogFd, text);
+        } catch (error) {
+          artifactWriteError ??= error instanceof Error ? error.message : String(error);
+        }
+      }
     });
     managedProcess.child.stderr?.setEncoding('utf8');
     managedProcess.child.stderr?.on('data', (chunk: string | Buffer) => {
-      const appended = appendProcessOutput(stderr, toProcessText(chunk));
+      const text = toProcessText(chunk);
+      const appended = appendProcessOutput(stderr, text);
       stderr = appended.output;
       stderrTruncated ||= appended.truncated;
+      if (stderrLogFd !== undefined) {
+        try {
+          writeLogChunk(stderrLogFd, text);
+        } catch (error) {
+          artifactWriteError ??= error instanceof Error ? error.message : String(error);
+        }
+      }
     });
 
     const exit = await managedProcess.wait();
     abortSignal?.throwIfAborted();
     if (timedOut) {
+      closeLogFiles();
       return {
         outcome: 'timeout',
         status: null,
@@ -387,9 +453,11 @@ async function runProcess(
         stderr,
         stdoutTruncated,
         stderrTruncated,
+        ...(artifactWriteError === undefined ? {} : { artifactWriteError }),
         error: `Process timed out after ${timeout} ms`,
       };
     }
+    closeLogFiles();
     return {
       outcome: exit.signal === null ? 'exit' : 'signal',
       status: exit.code,
@@ -397,10 +465,12 @@ async function runProcess(
       stderr,
       stdoutTruncated,
       stderrTruncated,
+      ...(artifactWriteError === undefined ? {} : { artifactWriteError }),
     };
   } catch (error) {
     abortSignal?.throwIfAborted();
     if (timedOut) {
+      closeLogFiles();
       return {
         outcome: 'timeout',
         status: null,
@@ -408,9 +478,11 @@ async function runProcess(
         stderr,
         stdoutTruncated,
         stderrTruncated,
+        ...(artifactWriteError === undefined ? {} : { artifactWriteError }),
         error: `Process timed out after ${timeout} ms`,
       };
     }
+    closeLogFiles();
     return {
       outcome: 'spawn_error',
       status: null,
@@ -418,11 +490,21 @@ async function runProcess(
       stderr,
       stdoutTruncated,
       stderrTruncated,
+      ...(artifactWriteError === undefined ? {} : { artifactWriteError }),
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
+    closeLogFiles();
     clearTimeout(timeoutHandle);
     abortSignal?.removeEventListener('abort', onAbort);
+  }
+}
+
+function writeLogChunk(fileDescriptor: number, text: string): void {
+  const chunk = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < chunk.length) {
+    offset += writeSync(fileDescriptor, chunk, offset, chunk.length - offset);
   }
 }
 
@@ -443,7 +525,7 @@ function formatProcessFailureMessage(
   output: string,
   additionalMessage?: string,
 ): string {
-  const details = [additionalMessage, result.error, output]
+  const details = [additionalMessage, result.error, result.artifactWriteError, output]
     .filter((detail): detail is string => detail !== undefined && detail.length > 0)
     .join('\n');
   const exitStatus = result.status === null ? 'unknown' : String(result.status);
@@ -527,7 +609,7 @@ function errorStage(message: string): FormalSpecStageResult {
 }
 
 function isSuccessfulProcess(result: ProcessResult): boolean {
-  return result.outcome === 'exit' && result.status === 0;
+  return result.outcome === 'exit' && result.status === 0 && result.artifactWriteError === undefined;
 }
 
 function specificationProcessStage(result: ProcessResult): FormalSpecStageResult {
@@ -601,11 +683,37 @@ function createRunDirectory(cwd: string): string {
   const runDirectory = mkdtempSync(join(runsDirectory, 'verify-'));
   try {
     mkdirSync(join(runDirectory, 'specs'), { mode: 0o700 });
+    mkdirSync(join(runDirectory, 'logs'), { mode: 0o700 });
   } catch (error) {
     removeVerifyRunDirectory(runDirectory);
     throw error;
   }
   return runDirectory;
+}
+
+function createFormalSpecVerificationArtifacts(
+  runDirectory: string,
+  quintSpecificationPath: string | undefined,
+  alloySpecificationPath: string | undefined,
+  parseJsonPath: string | undefined,
+  logs: Readonly<Record<string, ProcessLogPaths>>,
+): FormalSpecVerificationArtifacts {
+  return {
+    runDirectory,
+    specifications: {
+      ...(quintSpecificationPath ? { quint: quintSpecificationPath } : {}),
+      ...(alloySpecificationPath ? { alloy: alloySpecificationPath } : {}),
+    },
+    ...(parseJsonPath ? { parseJson: parseJsonPath } : {}),
+    logs: Object.fromEntries(Object.entries(logs).map(([stage, paths]) => [stage, { ...paths }])),
+  };
+}
+
+/** Remove verification artifacts after the interpretation call has finished. */
+export function cleanupFormalSpecVerificationArtifacts(result: FormalSpecVerificationResult): void {
+  if (result.artifacts) {
+    removeVerifyRunDirectory(result.artifacts.runDirectory);
+  }
 }
 
 function writeSpecification(directory: string, name: string, blocks: readonly string[]): string {
@@ -730,8 +838,12 @@ async function ensureAlloyJar(
 async function javaVersion(
   cwd: string,
   abortSignal?: AbortSignal,
+  logPaths?: ProcessLogPaths,
 ): Promise<number | undefined> {
-  const result = await runProcess('java', ['-version'], cwd, 10_000, abortSignal);
+  const result = await runProcess('java', ['-version'], cwd, 10_000, abortSignal, logPaths);
+  if (result.artifactWriteError !== undefined) {
+    throw new Error(result.artifactWriteError);
+  }
   if (!isSuccessfulProcess(result)) {
     return undefined;
   }
@@ -744,6 +856,7 @@ async function runQuintCommand(
   cwd: string,
   timeoutMs: number,
   abortSignal?: AbortSignal,
+  logPaths?: ProcessLogPaths,
 ): Promise<ProcessResult> {
   return runProcess(
     process.execPath,
@@ -751,6 +864,7 @@ async function runQuintCommand(
     cwd,
     timeoutMs,
     abortSignal,
+    logPaths,
   );
 }
 
@@ -760,6 +874,7 @@ async function runAlloyCommand(
   cwd: string,
   timeoutMs: number,
   abortSignal?: AbortSignal,
+  logPaths?: ProcessLogPaths,
 ): Promise<ProcessResult> {
   return runProcess(
     'java',
@@ -767,7 +882,21 @@ async function runAlloyCommand(
     cwd,
     timeoutMs,
     abortSignal,
+    logPaths,
   );
+}
+
+function createProcessLogPaths(
+  logsDirectory: string,
+  stage: string,
+  logs: Record<string, ProcessLogPaths>,
+): ProcessLogPaths {
+  const paths = {
+    stdout: join(logsDirectory, `${stage}.stdout.log`),
+    stderr: join(logsDirectory, `${stage}.stderr.log`),
+  };
+  logs[stage] = paths;
+  return paths;
 }
 
 interface QuintStageSet {
@@ -822,15 +951,20 @@ export async function runFormalSpecVerification(
   const modelCheckTimeoutMs = modelCheckTimeoutSeconds * 1000;
 
   let runDirectory: string | undefined;
+  let quintSpecificationPath: string | undefined;
+  let alloySpecificationPath: string | undefined;
+  let parseJsonPath: string | undefined;
   let verificationStarted = false;
+  const processLogs: Record<string, ProcessLogPaths> = {};
   try {
     verificationStarted = true;
     runDirectory = createRunDirectory(cwd);
     const specsDirectory = join(runDirectory, 'specs');
-    const quintPath = blocks.quint.length > 0
+    const logsDirectory = join(runDirectory, 'logs');
+    quintSpecificationPath = blocks.quint.length > 0
       ? writeSpecification(runDirectory, 'spec.qnt', blocks.quint)
       : undefined;
-    const alloyPath = blocks.alloy.length > 0
+    alloySpecificationPath = blocks.alloy.length > 0
       ? writeSpecification(runDirectory, 'spec.als', blocks.alloy)
       : undefined;
 
@@ -840,21 +974,26 @@ export async function runFormalSpecVerification(
     let mainModule: string | undefined;
     let targetScopeError: string | undefined;
     let quintStageSet: QuintStageSet = {};
-    if (!quintPath) {
+    if (!quintSpecificationPath) {
       quint = skippedQuintResult('No Quint specification block was present.');
       stages.push(quint);
     } else {
       const quintCli = resolveQuintCli();
-      const parseJsonPath = join(specsDirectory, 'parse.json');
+      parseJsonPath = join(specsDirectory, 'parse.json');
+      writeFileSync(parseJsonPath, '', { encoding: 'utf8', mode: 0o600 });
       let parse = specificationProcessStage(
         await runQuintCommand(
           quintCli,
-          ['parse', quintPath, '--out', parseJsonPath],
+          ['parse', quintSpecificationPath, '--out', parseJsonPath],
           runDirectory,
           QUINT_TIMEOUT_MS,
           abortSignal,
+          createProcessLogPaths(logsDirectory, 'quint-parse', processLogs),
         ),
       );
+      if (existsSync(parseJsonPath)) {
+        chmodSync(parseJsonPath, 0o600);
+      }
       if (parse.status === 'error') {
         const detailedMessage = quintParseErrorsMessage(parseJsonPath);
         if (detailedMessage !== undefined) {
@@ -883,10 +1022,11 @@ export async function runFormalSpecVerification(
         typecheck = specificationProcessStage(
           await runQuintCommand(
             quintCli,
-            ['typecheck', quintPath],
+            ['typecheck', quintSpecificationPath],
             runDirectory,
             QUINT_TIMEOUT_MS,
             abortSignal,
+            createProcessLogPaths(logsDirectory, 'quint-typecheck', processLogs),
           ),
         );
       }
@@ -899,7 +1039,7 @@ export async function runFormalSpecVerification(
           const invariantNames = targets.invariants.map(({ name }) => name);
           const runArgs = [
             'run',
-            quintPath,
+            quintSpecificationPath,
             '--main',
             mainModule,
             '--backend',
@@ -909,11 +1049,18 @@ export async function runFormalSpecVerification(
             '--max-steps',
             '20',
             '--verbosity',
-            '0',
+            '2',
             ...(invariantNames.length > 0 ? ['--invariants', ...invariantNames] : []),
           ];
           run = verificationProcessStage(
-            await runQuintCommand(quintCli, runArgs, runDirectory, QUINT_TIMEOUT_MS, abortSignal),
+            await runQuintCommand(
+              quintCli,
+              runArgs,
+              runDirectory,
+              QUINT_TIMEOUT_MS,
+              abortSignal,
+              createProcessLogPaths(logsDirectory, 'quint-run', processLogs),
+            ),
             'typescript',
           );
         }
@@ -922,26 +1069,30 @@ export async function runFormalSpecVerification(
       quint = quintResultFromStages(quintStageSet, targets);
     }
 
-    const canRunQuintVerify = quintPath !== undefined
+    const canRunQuintVerify = quintSpecificationPath !== undefined
       && mainModule !== undefined
       && quint.parse?.status === 'passed'
       && quint.typecheck?.status === 'passed'
       && quint.run?.status === 'passed';
-    const javaDetectionRan = alloyPath !== undefined || canRunQuintVerify;
+    const javaDetectionRan = alloySpecificationPath !== undefined || canRunQuintVerify;
     const detectedJavaMajorVersion = javaDetectionRan
-      ? await javaVersion(runDirectory, abortSignal)
+      ? await javaVersion(
+        runDirectory,
+        abortSignal,
+        createProcessLogPaths(logsDirectory, 'java-version', processLogs),
+      )
       : undefined;
     const hasJava17 = detectedJavaMajorVersion !== undefined && detectedJavaMajorVersion >= 17;
-    const javaSkipMessage = alloyPath === undefined
+    const javaSkipMessage = alloySpecificationPath === undefined
       ? 'Java 17 or later was not detected; Quint verification was skipped.'
       : 'Java 17 or later was not detected; Quint verify and Alloy verification were skipped. Alloy specifications remain unverified.';
 
-    if (canRunQuintVerify && hasJava17 && quintPath !== undefined && mainModule !== undefined) {
+    if (canRunQuintVerify && hasJava17 && quintSpecificationPath !== undefined && mainModule !== undefined) {
       const quintCli = resolveQuintCli();
       const verifyBackend: QuintVerificationBackend = targets.temporal.length > 0 ? 'tlc' : 'apalache';
       const verifyArgs = [
         'verify',
-        quintPath,
+        quintSpecificationPath,
         '--main',
         mainModule,
         ...(verifyBackend === 'tlc' ? ['--backend', verifyBackend] : []),
@@ -956,21 +1107,28 @@ export async function runFormalSpecVerification(
           : []),
       ];
       const verify = verificationProcessStage(
-        await runQuintCommand(quintCli, verifyArgs, runDirectory, modelCheckTimeoutMs, abortSignal),
+        await runQuintCommand(
+          quintCli,
+          verifyArgs,
+          runDirectory,
+          modelCheckTimeoutMs,
+          abortSignal,
+          createProcessLogPaths(logsDirectory, 'quint-verify', processLogs),
+        ),
         verifyBackend,
       );
-      if (quintPath) {
+      if (quintSpecificationPath) {
         quintStageSet = { ...quintStageSet, verify };
         quint = quintResultFromStages(quintStageSet, targets);
       }
-    } else if (quintPath) {
+    } else if (quintSpecificationPath) {
       const message = canRunQuintVerify && javaDetectionRan
         ? javaSkipMessage
         : 'Quint verification was skipped because an earlier Quint stage did not pass.';
       quintStageSet = { ...quintStageSet, verify: skippedStage(message) };
       quint = quintResultFromStages(quintStageSet, targets);
     }
-    if (quintPath) {
+    if (quintSpecificationPath) {
       stages.push(
         ...[quintStageSet.parse, quintStageSet.typecheck, quintStageSet.run, quintStageSet.verify]
           .filter((stage): stage is FormalSpecStageResult => stage !== undefined),
@@ -978,7 +1136,7 @@ export async function runFormalSpecVerification(
     }
 
     let alloy: FormalSpecAlloyResult = skippedAlloyResult('Alloy verification was not run.');
-    if (!alloyPath) {
+    if (!alloySpecificationPath) {
       alloy = skippedAlloyResult('No Alloy specification block was present.');
       stages.push(alloy);
     } else if (!hasJava17) {
@@ -997,10 +1155,11 @@ export async function runFormalSpecVerification(
       if (jarPath !== undefined) {
         const commandsProcess = await runAlloyCommand(
           jarPath,
-          ['commands', alloyPath],
+          ['commands', alloySpecificationPath],
           runDirectory,
           modelCheckTimeoutMs,
           abortSignal,
+          createProcessLogPaths(logsDirectory, 'alloy-commands', processLogs),
         );
         if (!isSuccessfulProcess(commandsProcess)) {
           alloy = { status: 'error', message: processFailureMessage(commandsProcess) };
@@ -1019,10 +1178,11 @@ export async function runFormalSpecVerification(
             for (const commandNumber of checkTargets) {
               const checkProcess = await runAlloyCommand(
                 jarPath,
-                ['exec', '--quiet', '--type', 'text', '--output', '-', '--command', String(commandNumber), alloyPath],
+                ['exec', '--quiet', '--type', 'text', '--output', '-', '--command', String(commandNumber), alloySpecificationPath],
                 runDirectory,
                 modelCheckTimeoutMs,
                 abortSignal,
+                createProcessLogPaths(logsDirectory, `alloy-check-${commandNumber}`, processLogs),
               );
               const check = isSuccessfulProcess(checkProcess) && checkProcess.stdout.trim() === ''
                 ? passedStage()
@@ -1052,14 +1212,33 @@ export async function runFormalSpecVerification(
       ...(detectedJavaMajorVersion === undefined ? {} : { javaMajorVersion: detectedJavaMajorVersion }),
       quint,
       alloy,
+      artifacts: createFormalSpecVerificationArtifacts(
+        runDirectory,
+        quintSpecificationPath,
+        alloySpecificationPath,
+        parseJsonPath,
+        processLogs,
+      ),
     };
   } catch (error) {
     if (abortSignal?.aborted) {
       throw abortSignal.reason ?? error;
     }
-    return resultForUnexpectedError(error, verificationStarted);
+    const result = resultForUnexpectedError(error, verificationStarted);
+    return runDirectory === undefined
+      ? result
+      : {
+        ...result,
+        artifacts: createFormalSpecVerificationArtifacts(
+          runDirectory,
+          quintSpecificationPath,
+          alloySpecificationPath,
+          parseJsonPath,
+          processLogs,
+        ),
+      };
   } finally {
-    if (runDirectory) {
+    if (runDirectory && abortSignal?.aborted) {
       removeVerifyRunDirectory(runDirectory);
     }
   }
