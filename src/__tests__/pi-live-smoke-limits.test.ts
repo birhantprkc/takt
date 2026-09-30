@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
 
 interface SmokeBudget {
   beginTurn(): void;
@@ -6,7 +7,20 @@ interface SmokeBudget {
   submit(url: string): void;
   counts(): { requests: number; submissions: number };
 }
-const harness: { createSmokeBudget(): SmokeBudget } = await import(
+interface SmokeFiles {
+  root: string;
+  agentDir: string;
+  files: string[];
+  before: Map<string, string | undefined>;
+}
+interface SmokeFileIo {
+  readFile(file: string): Promise<Uint8Array>;
+  rm(root: string, options: { recursive: true; force: true }): Promise<void>;
+}
+const harness: {
+  createSmokeBudget(): SmokeBudget;
+  verifySmokeFilesAndCleanup(files: SmokeFiles, io: SmokeFileIo): Promise<string[]>;
+} = await import(
   new URL('../../scripts/pi-provider-live-smoke.mjs', import.meta.url).href
 );
 const model = { provider: 'openai-codex', id: 'gpt-6.1-sol', api: 'openai-codex-responses' };
@@ -48,5 +62,50 @@ describe('Pi live smoke request limits', () => {
     budget.request(model, options);
     expect(() => budget.submit('https://example.com/codex/responses')).toThrow();
     expect(budget.counts().submissions).toBe(0);
+  });
+});
+
+describe('Pi live smoke file verification and cleanup', () => {
+  const original = Buffer.from('original');
+  const before = new Map([['auth.json', createHash('sha256').update(original).digest('hex')]]);
+  const input = { root: '/smoke', agentDir: '/agent', files: ['auth.json'], before };
+
+  it('cleans up before returning a modified-file error without throwing', async () => {
+    const events: string[] = [];
+    const io = {
+      readFile: vi.fn(async () => { events.push('check'); return Buffer.from('modified'); }),
+      rm: vi.fn(async () => { events.push('cleanup'); }),
+    };
+    await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['auth.json must not be modified']);
+    expect(events).toEqual(['check', 'cleanup']);
+    expect(io.rm).toHaveBeenCalledExactlyOnceWith('/smoke', { recursive: true, force: true });
+  });
+
+  it('still cleans up when a protected file cannot be read', async () => {
+    const io = {
+      readFile: vi.fn(async () => { throw Object.assign(new Error('unreadable'), { code: 'EACCES' }); }),
+      rm: vi.fn(async () => {}),
+    };
+    await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['auth.json could not be verified']);
+    expect(io.rm).toHaveBeenCalledOnce();
+  });
+
+  it('accepts unchanged files and files that remain absent', async () => {
+    const io = { readFile: vi.fn(async () => original), rm: vi.fn(async () => {}) };
+    await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual([]);
+    const absent = {
+      readFile: vi.fn(async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); }),
+      rm: vi.fn(async () => {}),
+    };
+    await expect(harness.verifySmokeFilesAndCleanup({ ...input, before: new Map([['auth.json', undefined]]) }, absent)).resolves.toEqual([]);
+    expect(absent.rm).toHaveBeenCalledOnce();
+  });
+
+  it('reports cleanup failure without replacing a prior error with an exception', async () => {
+    const io = {
+      readFile: vi.fn(async () => original),
+      rm: vi.fn(async () => { throw new Error('cleanup failed'); }),
+    };
+    await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['Smoke temporary directory cleanup failed']);
   });
 });

@@ -50,6 +50,30 @@ export function createSmokeBudget() {
   };
 }
 
+/** Check protected files without letting inspection errors skip cleanup. */
+export async function verifySmokeFilesAndCleanup({ root, agentDir, files, before }, io = { readFile, rm }) {
+  const errors = [];
+  for (const file of files) {
+    let after;
+    try {
+      const bytes = await io.readFile(join(agentDir, file));
+      after = createHash('sha256').update(bytes).digest('hex');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        errors.push(`${file} could not be verified`);
+        continue;
+      }
+    }
+    if (after !== before.get(file)) errors.push(`${file} must not be modified`);
+  }
+  try {
+    await io.rm(root, { recursive: true, force: true });
+  } catch {
+    errors.push('Smoke temporary directory cleanup failed');
+  }
+  return errors;
+}
+
 // Importing the budget for unit tests must never start a live inference.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const { AgentSession, getAgentDir, ModelRuntime, SettingsManager } = await import('@earendil-works/pi-coding-agent');
@@ -176,16 +200,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     SettingsManager.inMemory = originalSettings;
     ModelRuntime.prototype.streamSimple = originalStream;
     AgentSession.prototype.bindExtensions = originalBind;
-    for (const file of files) {
-      let after;
-      try {
-        const bytes = await readFile(join(agentDir, file));
-        after = createHash('sha256').update(bytes).digest('hex');
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-      assert.equal(after, before.get(file), `${file} must not be modified`);
+    const errors = await verifySmokeFilesAndCleanup({ root, agentDir, files, before });
+    if (errors.length > 0) {
+      console.error(JSON.stringify({ status: 'error', reason: errors.join('; '), ...budget.counts() }));
+      process.exitCode = 1;
     }
-    await rm(root, { recursive: true, force: true });
   }
 }
