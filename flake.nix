@@ -36,6 +36,15 @@
             ONNXRUNTIME_NODE_INSTALL = "skip";
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
 
+            # npm prune fails in its reify rollback for this dependency tree.
+            # Recreate the production-only tree from the same lockfile/cache,
+            # retaining dependency install scripts without changing CI checks.
+            preInstall = ''
+              npm ci --omit=dev --ignore-scripts
+              npm rebuild --omit=dev
+            '';
+            dontNpmPrune = true;
+
             meta = {
               description = packageJson.description;
               homepage = packageJson.homepage;
