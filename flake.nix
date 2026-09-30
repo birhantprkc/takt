@@ -41,7 +41,9 @@
             # retaining dependency install scripts without changing CI checks.
             preInstall = ''
               npm ci --omit=dev --ignore-scripts
+              patchShebangs node_modules
               npm rebuild --omit=dev
+              patchShebangs node_modules
             '';
             dontNpmPrune = true;
 
