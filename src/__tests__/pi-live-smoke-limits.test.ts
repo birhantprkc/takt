@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 
 interface SmokeBudget {
+  /** Begins an authorized turn, resetting per-turn but not total counters. */
   beginTurn(): void;
+  /** Validates model/options and reserves the turn's single inference request. */
   request(model: object, options: object): void;
+  /** Validates the Codex endpoint and reserves one HTTP submission for the turn. */
   submit(url: string): void;
+  /** Returns consumed SDK and HTTP counters without reserving further requests. */
   counts(): { requests: number; submissions: number };
 }
 interface SmokeFiles {
@@ -14,11 +18,15 @@ interface SmokeFiles {
   before: Map<string, string | undefined>;
 }
 interface SmokeFileIo {
+  /** Supplies protected-file bytes, including simulated read failures. */
   readFile(file: string): Promise<Uint8Array>;
+  /** Removes the isolated root even when protected-file verification fails. */
   rm(root: string, options: { recursive: true; force: true }): Promise<void>;
 }
 const harness: {
+  /** Creates a fresh two-turn budget without running the live smoke entrypoint. */
   createSmokeBudget(): SmokeBudget;
+  /** Reports verification/cleanup failures without discarding the original error. */
   verifySmokeFilesAndCleanup(files: SmokeFiles, io: SmokeFileIo): Promise<string[]>;
 } = await import(
   new URL('../../scripts/pi-provider-live-smoke.mjs', import.meta.url).href

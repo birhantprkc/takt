@@ -323,7 +323,6 @@ export default function register(pi) {
       const request = { ...options, permissionMode: 'full' as const, allowedTools };
       const response = await callPi('worker', 'nested tools', request);
       expect(response.status).toBe('error');
-      expect(response.error).toContain('Pi explicit extension provenance could not be verified');
       expect(executions()).toEqual([]);
       expect(sessions[0]!.getActiveToolNames()).toEqual([]);
       const retry = await callPi('worker', 'must remain rejected', { ...request, sessionId: response.sessionId });

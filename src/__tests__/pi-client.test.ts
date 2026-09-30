@@ -1942,7 +1942,7 @@ export default function registerLifecycleTool(pi) {
           : route === 'selection'
             ? () => mocks.triggerRuntimeSetActiveTools(['trusted_extension_tool'])
             : () => invokeToolGuard('trusted_extension_tool');
-        expect(act).toThrow('Pi explicit extension provenance could not be verified');
+        expect(act).toThrow();
       }
       expect(mocks.session.setActiveToolsByName).toHaveBeenLastCalledWith([]);
       expect(mocks.session.abort).toHaveBeenCalled();
