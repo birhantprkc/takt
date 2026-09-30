@@ -82,6 +82,7 @@ interface PiToolPolicyState {
 }
 
 class PiToolPolicyError extends Error {}
+class PiRuntimeCleanupError extends Error {}
 
 interface PiExecutionGuard {
   check: (toolName: string) => boolean;
@@ -91,6 +92,7 @@ interface PiSessionRecord {
   current: PiSessionRuntime;
   sessionManager: SessionManager;
   toolPolicyState: PiToolPolicyState;
+  runtimeCleanupFailure?: PiRuntimeCleanupError;
   cwd: string;
   operationTail: Promise<void>;
   activeOperations: number;
@@ -1148,10 +1150,15 @@ async function applyPiModel(
   }
 }
 
-async function shutdownPiSession(session: AgentSession): Promise<void> {
+async function shutdownPiSession(session: AgentSession, extensionErrors: readonly string[] = []): Promise<void> {
   try {
     if (session.hasExtensionHandlers('session_shutdown')) {
       await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    }
+    // The SDK reports handler failures through onError instead of rejecting
+    // emit(). Check the notifications before acknowledging a safe cleanup.
+    if (extensionErrors.length > 0) {
+      throw new Error(`Pi extension shutdown failed: ${extensionErrors.join('; ')}`);
     }
   } finally {
     session.dispose();
@@ -1160,14 +1167,7 @@ async function shutdownPiSession(session: AgentSession): Promise<void> {
 
 function getPiRuntimeShutdown(runtime: PiSessionRuntime): Promise<void> {
   runtime.shutdownPromise ??= Promise.resolve()
-    .then(async () => {
-      await shutdownPiSession(runtime.session);
-      // The SDK reports handler failures through onError instead of rejecting
-      // emit(). Both forms must prevent a replacement runtime from starting.
-      if (runtime.extensionErrors.length > 0) {
-        throw new Error(`Pi extension shutdown failed: ${runtime.extensionErrors.join('; ')}`);
-      }
-    });
+    .then(() => shutdownPiSession(runtime.session, runtime.extensionErrors));
   return runtime.shutdownPromise;
 }
 
@@ -1290,6 +1290,7 @@ async function createPiSessionRuntime(
     invalidateRejectedResourceLoader(resourceLoader);
     throw error;
   }
+  const extensionErrors: string[] = [];
   try {
     if (isAbortRequested(options.abortSignal)) {
       throw new Error('Pi session aborted');
@@ -1314,7 +1315,6 @@ async function createPiSessionRuntime(
       result.session.getAllTools(),
     );
 
-    const extensionErrors: string[] = [];
     await result.session.bindExtensions({
       mode: 'print',
       onError: (error) => extensionErrors.push(formatExtensionRuntimeError(error)),
@@ -1343,7 +1343,15 @@ async function createPiSessionRuntime(
       result.session.setActiveToolsByName([]);
       void result.session.abort().catch(() => undefined);
     }
-    await shutdownPiSession(result.session).catch(() => undefined);
+    // The original error already captures startup failure. Clear those
+    // notifications so only errors from cleanup can poison the logical session.
+    extensionErrors.length = 0;
+    try {
+      await shutdownPiSession(result.session, extensionErrors);
+    } catch (cleanupError) {
+      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      throw new PiRuntimeCleanupError(`Pi runtime cleanup failed after initialization failure: ${message}`, { cause: error });
+    }
     throw error;
   }
 }
@@ -1376,6 +1384,7 @@ async function createPiSession(
 
 /** Keeps canonical history and the queue while replacing an idle SDK runtime. */
 async function updatePiSessionConfiguration(record: PiSessionRecord, options: PiCallOptions): Promise<void> {
+  if (record.runtimeCleanupFailure !== undefined) throw record.runtimeCleanupFailure;
   record.current.assertPiToolPolicyHealthy();
   const agentDir = getAgentDir();
   const fingerprint = buildSessionConfigurationFingerprint(options, agentDir);
@@ -1416,6 +1425,7 @@ async function updatePiSessionConfiguration(record: PiSessionRecord, options: Pi
     // Keep its override state so an unset option resets it before the next turn.
     record.current.thinkingLevelOverrideActive ||= thinkingLevelOverrideActive;
   } catch (error) {
+    if (error instanceof PiRuntimeCleanupError) record.runtimeCleanupFailure = error;
     if (error instanceof PiToolPolicyError) record.toolPolicyState.failure = error;
     // Retain the canonical manager and queue after a transient creation error.
     // shutdownPromise marks the old runtime unusable, even if the next request

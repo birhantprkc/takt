@@ -136,6 +136,93 @@ export default function extension(pi) {
     expect(sessions).toHaveLength(1);
   });
 
+  it.each(['sdk-handler', 'promise-rejection'] as const)('retains failed replacement cleanup across later configurations (%s)', async (failureMode) => {
+    const first = await callPi('worker', 'remember:cleanup-failure-marker', options);
+    expect(first.status).toBe('done');
+    const originalRuntime = sessions[0]!;
+    const originalMessages = originalRuntime.sessionManager.getEntries().filter((entry) => entry.type === 'message');
+    const originalShutdown = vi.spyOn(originalRuntime.extensionRunner, 'emit');
+    const failingPath = path.join(root, 'failed-replacement.js');
+    writeFileSync(failingPath, `
+import register from ${JSON.stringify(fixturePath)};
+export default function extension(pi) {
+  register(pi);
+  pi.on('session_start', () => { throw new Error('replacement startup failed'); });
+  pi.on('session_shutdown', () => {
+    ${failureMode === 'sdk-handler' ? "throw new Error('replacement cleanup failed');" : ''}
+  });
+}
+`);
+    const bind = vi.mocked(AgentSession.prototype.bindExtensions).getMockImplementation()!;
+    vi.mocked(AgentSession.prototype.bindExtensions).mockImplementationOnce(async function (this: AgentSession, bindOptions) {
+      await bind.call(this, bindOptions);
+      const shutdown = vi.spyOn(this.extensionRunner, 'emit');
+      if (failureMode === 'promise-rejection') {
+        shutdown.mockRejectedValueOnce(new Error('replacement cleanup failed'));
+      }
+    });
+    const replacement = {
+      ...options,
+      sessionId: first.sessionId,
+      providerOptions: { ...options.providerOptions, extensions: [failingPath] },
+    };
+    expect((await callPi('worker', 'must not prompt', replacement)).status).toBe('error');
+    expect(sessions).toHaveLength(2);
+    const failedRuntime = sessions[1]!;
+    const failedShutdown = vi.mocked(failedRuntime.extensionRunner.emit);
+    expect(failedShutdown).toHaveBeenCalledOnce();
+    expect(failedShutdown).toHaveBeenCalledWith({ type: 'session_shutdown', reason: 'quit' });
+    if (failureMode === 'sdk-handler') {
+      // The real SDK resolves emit() even though it notified onError.
+      await expect(failedShutdown.mock.results[0]!.value).resolves.toBeUndefined();
+    }
+    for (const next of [
+      replacement,
+      { ...options, sessionId: first.sessionId },
+      {
+        ...replacement,
+        permissionMode: 'full' as const,
+        providerOptions: { ...options.providerOptions, extensions: [writeReplacementExtension()] },
+      },
+    ]) {
+      expect(await callPi('worker', 'must not bypass failed cleanup', next)).toMatchObject({
+        status: 'error',
+        sessionId: first.sessionId,
+        error: expect.stringContaining('replacement cleanup failed'),
+      });
+    }
+    expect(sessions).toHaveLength(2);
+    expect(originalShutdown).toHaveBeenCalledOnce();
+    expect(failedShutdown).toHaveBeenCalledOnce();
+    expect(vi.mocked(AgentSession.prototype.dispose).mock.contexts.filter((session) => session === failedRuntime)).toHaveLength(1);
+    expect(originalRuntime.sessionManager.getEntries().filter((entry) => entry.type === 'message')).toEqual(originalMessages);
+  });
+
+  it('does not treat a startup onError as a cleanup failure when cleanup succeeds', async () => {
+    const first = await callPi('worker', 'remember:startup-only-marker', options);
+    expect(first.status).toBe('done');
+    const failingPath = path.join(root, 'startup-only-failure.js');
+    writeFileSync(failingPath, `
+import register from ${JSON.stringify(fixturePath)};
+export default function extension(pi) {
+  register(pi);
+  pi.on('session_start', () => { throw new Error('startup only failure'); });
+}
+`);
+    expect(await callPi('worker', 'must not prompt', {
+      ...options,
+      sessionId: first.sessionId,
+      providerOptions: { ...options.providerOptions, extensions: [failingPath] },
+    })).toMatchObject({ status: 'error', error: expect.stringContaining('startup only failure') });
+    const recovered = await callPi('worker', 'recall', { ...options, sessionId: first.sessionId });
+    expect(recovered.status).toBe('done');
+    expect(recovered.sessionId).toBe(first.sessionId);
+    expect(JSON.parse(recovered.content)).toEqual([
+      'remember:startup-only-marker', 'saved:startup-only-marker', 'recall',
+    ]);
+    expect(sessions).toHaveLength(3);
+  });
+
   it('restores canonical context edits when a changed extension configuration rebuilds the runtime', async () => {
     const first = await callPi('worker', 'remember:original-marker', options);
     expect(first.status).toBe('done');
