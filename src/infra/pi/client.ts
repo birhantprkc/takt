@@ -66,15 +66,32 @@ function isAbortRequested(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
-interface PiSessionRecord {
+interface PiSessionRuntime {
   session: AgentSession;
   runtime: ModelRuntime;
-  cwd: string;
   configurationFingerprint: string;
   setPiToolPolicyOptions: (options: PiCallOptions) => void;
   assertPiToolPolicyHealthy: () => void;
   thinkingLevelOverrideActive: boolean;
   extensionErrors: string[];
+  shutdownPromise?: Promise<void>;
+}
+
+interface PiToolPolicyState {
+  failure?: unknown;
+}
+
+class PiToolPolicyError extends Error {}
+
+interface PiExecutionGuard {
+  check: (toolName: string) => boolean;
+}
+
+interface PiSessionRecord {
+  current: PiSessionRuntime;
+  sessionManager: SessionManager;
+  toolPolicyState: PiToolPolicyState;
+  cwd: string;
   operationTail: Promise<void>;
   activeOperations: number;
   lastUsedAt: number;
@@ -266,7 +283,9 @@ function getPiToolProvenance(
 ): PiToolProvenance {
   return {
     source: sourceInfo.source,
-    sourcePath: extensionPathKey(cwd, sourceInfo.path),
+    sourcePath: sourceInfo.source === 'builtin' && sourceInfo.path.startsWith('builtin:')
+      ? sourceInfo.path
+      : extensionPathKey(cwd, sourceInfo.path),
   };
 }
 
@@ -294,13 +313,13 @@ function applyPiTools(
       if (original !== undefined
         ? !hasMatchingPiToolProvenance(original, tool)
         : tool.source === 'builtin' || explicitExtensionPaths.includes(tool.sourcePath)) {
-        throw new Error('Pi explicit extension provenance could not be verified');
+        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
       }
     }
     for (const [name, original] of registeredProvenance) {
       if (explicitExtensionPaths.includes(original.sourcePath)
         && allTools.filter((tool) => tool.name === name).length !== 1) {
-        throw new Error('Pi explicit extension provenance could not be verified');
+        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
       }
     }
   }
@@ -322,10 +341,11 @@ function installPiToolRefreshPolicy(
   extensionsResult: LoadExtensionsResult,
   initialOptions: PiCallOptions,
   explicitExtensionPaths: readonly string[],
+  policyState: PiToolPolicyState,
+  executionGuard: PiExecutionGuard,
 ): { setOptions: (options: PiCallOptions) => void; assertHealthy: () => void } {
   let currentOptions = initialOptions;
   const extensionRuntime = extensionsResult.runtime;
-  let policyFailure: unknown;
   const owners = extensionsResult.extensions.map((extension) => ({
     tools: extension.tools,
     ...getPiToolProvenance(initialOptions.cwd, extension.sourceInfo),
@@ -339,17 +359,17 @@ function installPiToolRefreshPolicy(
   const setActiveTools = extensionRuntime.setActiveTools;
   const enforce = (update?: () => void) => {
     try {
-      if (policyFailure) throw policyFailure;
+      if (policyState.failure) throw policyState.failure;
       if (currentOptions.permissionMode !== 'full') {
         for (const owner of owners) {
           for (const [name, tool] of owner.tools) {
             const toolProvenance = getPiToolProvenance(initialOptions.cwd, tool.sourceInfo);
             if (!hasMatchingPiToolProvenance(toolProvenance, owner)) {
-              throw new Error('Pi explicit extension provenance could not be verified');
+              throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
             }
             const original = registeredProvenance.get(name);
             if (original && !hasMatchingPiToolProvenance(original, owner)) {
-              throw new Error('Pi explicit extension provenance could not be verified');
+              throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
             }
             if (!original) {
               registeredProvenance.set(name, { source: owner.source, sourcePath: owner.sourcePath });
@@ -360,7 +380,7 @@ function installPiToolRefreshPolicy(
       update?.();
       applyPiTools(session, currentOptions, explicitExtensionPaths, registeredProvenance);
     } catch (error) {
-      policyFailure = error;
+      policyState.failure = error;
       // SDK hook dispatch may swallow exceptions. Revoke tools synchronously,
       // request cancellation, and retain the failure for the next call too.
       session.setActiveToolsByName([]);
@@ -377,9 +397,17 @@ function installPiToolRefreshPolicy(
       || currentOptions.allowedTools !== undefined) {
       enforce();
     } else {
-      if (policyFailure) throw policyFailure;
+      if (policyState.failure) throw policyState.failure;
       setActiveTools(toolNames);
     }
+  };
+  executionGuard.check = (toolName) => {
+    if (currentOptions.permissionMode === 'full' && currentOptions.allowedTools === undefined) {
+      if (policyState.failure) throw policyState.failure;
+      return true;
+    }
+    enforce();
+    return session.getActiveToolNames().includes(toolName);
   };
 
   return {
@@ -388,7 +416,7 @@ function installPiToolRefreshPolicy(
       enforce();
     },
     assertHealthy: () => {
-      if (policyFailure) throw policyFailure;
+      if (policyState.failure) throw policyState.failure;
     },
   };
 }
@@ -589,12 +617,20 @@ function createPiResourceLoader(
   options: PiCallOptions,
   settingsManager: SettingsManager,
   resolvedResources: ResolvedPaths,
+  executionGuard: PiExecutionGuard,
 ): DefaultResourceLoader {
   const providerOptions = options.providerOptions;
   return new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
+    extensionFactories: [(pi) => {
+      pi.on('tool_call', (event) => (
+        executionGuard.check(event.toolName)
+          ? undefined
+          : { block: true, reason: 'Tool is not allowed by the TAKT Pi tool policy' }
+      ));
+    }],
     additionalExtensionPaths: enabledResourcePaths(resolvedResources, 'extensions'),
     additionalSkillPaths: enabledResourcePaths(resolvedResources, 'skills'),
     additionalPromptTemplatePaths: enabledResourcePaths(resolvedResources, 'prompts'),
@@ -753,17 +789,17 @@ function assertLoadedExplicitExtensions(
       explicitExtensionPathCandidates(cwd, extension).has(explicitPath)
     ));
     if (matches.length !== 1) {
-      throw new Error('Pi explicit extension provenance could not be verified');
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
     }
     const extension = matches[0];
     if (extension === undefined) {
-      throw new Error('Pi explicit extension provenance could not be verified');
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
     }
     const extensionPath = extensionPathKey(cwd, extension.path);
     const resolvedPath = extensionPathKey(cwd, extension.resolvedPath);
     const sourceInfoPath = extensionPathKey(cwd, extension.sourceInfo.path);
     if (sourceInfoPath !== extensionPath && sourceInfoPath !== resolvedPath) {
-      throw new Error('Pi explicit extension provenance could not be verified');
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
     }
   }
 }
@@ -789,11 +825,11 @@ function assertExplicitExtensionTools(
       explicitToolNames.add(toolName);
       const toolProvenance = getPiToolProvenance(cwd, tool.sourceInfo);
       if (!explicitPaths.has(toolProvenance.sourcePath)) {
-        throw new Error('Pi explicit extension provenance could not be verified');
+        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
       }
       const registeredTools = allTools.filter((candidate) => candidate.name === toolName);
       if (registeredTools.length !== 1) {
-        throw new Error('Pi explicit extension provenance could not be verified');
+        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
       }
       const registeredTool = registeredTools[0];
       if (registeredTool === undefined
@@ -801,7 +837,7 @@ function assertExplicitExtensionTools(
           toolProvenance,
           getPiToolProvenance(cwd, registeredTool.sourceInfo),
         )) {
-        throw new Error('Pi explicit extension provenance could not be verified');
+        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
       }
     }
   }
@@ -811,7 +847,7 @@ function assertExplicitExtensionTools(
       continue;
     }
     if (!explicitToolNames.has(tool.name)) {
-      throw new Error('Pi explicit extension provenance could not be verified');
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
     }
   }
 }
@@ -827,6 +863,7 @@ async function resolvePiResourceLoader(
   agentDir: string,
   options: PiCallOptions,
   settingsManager: SettingsManager,
+  executionGuard: PiExecutionGuard,
 ): Promise<PiResourceLoaderResolution> {
   assertPiSessionNotAborted(options.abortSignal);
   const sources = (options.providerOptions?.extensions ?? []).map((source) => source.trim());
@@ -850,7 +887,7 @@ async function resolvePiResourceLoader(
   assertPiSessionNotAborted(options.abortSignal);
   const resolved = mergeExtensionSourcePaths(resolutions);
   const explicitExtensionPaths = explicitExtensionPathsForResolutions(cwd, resolutions);
-  const resourceLoader = createPiResourceLoader(cwd, agentDir, options, settingsManager, resolved);
+  const resourceLoader = createPiResourceLoader(cwd, agentDir, options, settingsManager, resolved, executionGuard);
   try {
     assertPiSessionNotAborted(options.abortSignal);
     try {
@@ -1089,7 +1126,7 @@ function registerPendingExtensionProviders(
 }
 
 async function applyPiModel(
-  record: PiSessionRecord,
+  record: PiSessionRuntime,
   modelReference: string | undefined,
   thinkingLevelOption: string | undefined,
 ): Promise<void> {
@@ -1121,12 +1158,27 @@ async function shutdownPiSession(session: AgentSession): Promise<void> {
   }
 }
 
+function getPiRuntimeShutdown(runtime: PiSessionRuntime): Promise<void> {
+  runtime.shutdownPromise ??= Promise.resolve()
+    .then(async () => {
+      await shutdownPiSession(runtime.session);
+      // The SDK reports handler failures through onError instead of rejecting
+      // emit(). Both forms must prevent a replacement runtime from starting.
+      if (runtime.extensionErrors.length > 0) {
+        throw new Error(`Pi extension shutdown failed: ${runtime.extensionErrors.join('; ')}`);
+      }
+    });
+  return runtime.shutdownPromise;
+}
+
 function disposePiSessionRecord(record: PiSessionRecord): Promise<void> {
   if (record.disposed) {
     return record.disposalPromise ?? Promise.resolve();
   }
   record.disposed = true;
-  record.disposalPromise = shutdownPiSession(record.session).catch(() => undefined);
+  // Retirement is best-effort; replacement awaits the original rejecting
+  // promise so a failed cleanup can never be mistaken for a safe barrier.
+  record.disposalPromise = getPiRuntimeShutdown(record.current).catch(() => undefined);
   return record.disposalPromise;
 }
 
@@ -1176,11 +1228,13 @@ function cacheSessionRecord(record: PiSessionRecord, sessionIds: readonly string
 }
 
 /** Creates a session with verified resources and policy hooks before extension startup. */
-async function createPiSession(
+async function createPiSessionRuntime(
   options: PiCallOptions,
   agentDir: string,
   configurationFingerprint: string,
-): Promise<PiSessionRecord> {
+  sessionManager: SessionManager,
+  toolPolicyState: PiToolPolicyState,
+): Promise<PiSessionRuntime> {
   if (isAbortRequested(options.abortSignal)) {
     throw new Error('Pi session aborted');
   }
@@ -1189,6 +1243,9 @@ async function createPiSession(
   // resolved extension paths through additionalExtensionPaths.
   const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
   const runtime = await createModelRuntime(agentDir);
+  const executionGuard: PiExecutionGuard = {
+    check: () => { throw new Error('Pi tool policy is not initialized'); },
+  };
   if (isAbortRequested(options.abortSignal)) {
     throw new Error('Pi session aborted');
   }
@@ -1197,6 +1254,7 @@ async function createPiSession(
     agentDir,
     options,
     settingsManager,
+    executionGuard,
   );
   const { resourceLoader, explicitExtensionPaths } = resourceLoaderResolution;
   let result: Awaited<ReturnType<typeof createAgentSession>>;
@@ -1211,11 +1269,6 @@ async function createPiSession(
       throw new Error(`Pi extension loading failed: ${formatExtensionLoadErrors(loadErrors)}`);
     }
     registerPendingExtensionProviders(runtime, extensionsResult);
-    const sessionManager = SessionManager.inMemory(
-      options.cwd,
-      options.sessionId === undefined ? undefined : { id: options.sessionId },
-    );
-
     const bashTool = createBashToolDefinition(options.cwd, {
       spawnHook: (context) => ({
         ...context,
@@ -1251,6 +1304,8 @@ async function createPiSession(
       result.extensionsResult,
       options,
       explicitExtensionPaths,
+      toolPolicyState,
+      executionGuard,
     );
     assertExplicitExtensionTools(
       options.cwd,
@@ -1271,25 +1326,100 @@ async function createPiSession(
       throw new Error(`Pi extension startup failed: ${extensionErrors.join('; ')}`);
     }
 
-    const record: PiSessionRecord = {
+    const record: PiSessionRuntime = {
       session: result.session,
       runtime,
-      cwd: options.cwd,
       configurationFingerprint,
       setPiToolPolicyOptions: toolPolicy.setOptions,
       assertPiToolPolicyHealthy: toolPolicy.assertHealthy,
       thinkingLevelOverrideActive: false,
       extensionErrors,
-      operationTail: Promise.resolve(),
-      activeOperations: 0,
-      lastUsedAt: Date.now(),
-      retired: false,
-      disposed: false,
     };
     await applyPiModel(record, options.model, options.providerOptions?.thinkingLevel);
     return record;
   } catch (error) {
+    if (error instanceof PiToolPolicyError) {
+      toolPolicyState.failure = error;
+      result.session.setActiveToolsByName([]);
+      void result.session.abort().catch(() => undefined);
+    }
     await shutdownPiSession(result.session).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function createPiSession(
+  options: PiCallOptions,
+  agentDir: string,
+  configurationFingerprint: string,
+): Promise<PiSessionRecord> {
+  const sessionManager = SessionManager.inMemory(
+    options.cwd,
+    options.sessionId === undefined ? undefined : { id: options.sessionId },
+  );
+  const toolPolicyState: PiToolPolicyState = {};
+  const current = await createPiSessionRuntime(
+    options, agentDir, configurationFingerprint, sessionManager, toolPolicyState,
+  );
+  return {
+    current,
+    sessionManager,
+    toolPolicyState,
+    cwd: options.cwd,
+    operationTail: Promise.resolve(),
+    activeOperations: 0,
+    lastUsedAt: Date.now(),
+    retired: false,
+    disposed: false,
+  };
+}
+
+/** Keeps canonical history and the queue while replacing an idle SDK runtime. */
+async function updatePiSessionConfiguration(record: PiSessionRecord, options: PiCallOptions): Promise<void> {
+  record.current.assertPiToolPolicyHealthy();
+  const agentDir = getAgentDir();
+  const fingerprint = buildSessionConfigurationFingerprint(options, agentDir);
+  if (record.current.configurationFingerprint === fingerprint
+    && record.current.shutdownPromise === undefined) return;
+  const thinkingLevelOverrideActive = record.current.thinkingLevelOverrideActive;
+  const shutdown = getPiRuntimeShutdown(record.current);
+  const signal = options.abortSignal;
+  let onAbort: (() => void) | undefined;
+  try {
+    if (signal === undefined) {
+      await shutdown;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        onAbort = () => {
+          // Remove the record before the queue is released. Cleanup continues
+          // under the session's shared shutdown promise, without restarting it.
+          void retireSessionRecord(record);
+          reject(new Error('Pi session aborted'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        void shutdown.then(resolve, reject);
+      });
+    }
+  } finally {
+    if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort);
+  }
+  if (isAbortRequested(signal)) {
+    void retireSessionRecord(record);
+    throw new Error('Pi session aborted');
+  }
+  try {
+    record.current = await createPiSessionRuntime(
+      options, agentDir, fingerprint, record.sessionManager, record.toolPolicyState,
+    );
+    // Canonical restoration also restores the preceding turn's thinking level.
+    // Keep its override state so an unset option resets it before the next turn.
+    record.current.thinkingLevelOverrideActive ||= thinkingLevelOverrideActive;
+  } catch (error) {
+    if (error instanceof PiToolPolicyError) record.toolPolicyState.failure = error;
+    // Retain the canonical manager and queue after a transient creation error.
+    // shutdownPromise marks the old runtime unusable, even if the next request
+    // returns to its old fingerprint. Policy failures remain sticky as before.
     throw error;
   }
 }
@@ -1386,7 +1516,7 @@ function startPiSessionCreation(
       creation.record = record;
       creation.handoffLeaseHeld = true;
       record.activeOperations += 1;
-      cacheSessionRecord(record, [record.session.sessionId, requestedSessionId]);
+      cacheSessionRecord(record, [record.current.session.sessionId, requestedSessionId]);
       return record;
     },
     (error: unknown) => {
@@ -1406,16 +1536,12 @@ async function getOrCreatePiSession(options: PiCallOptions): Promise<PiSessionRe
     const requestedSessionId = options.sessionId;
     const key = sessionCacheKey(requestedSessionId, options.cwd);
     const existing = sessions.get(key);
-    if (existing?.configurationFingerprint === configurationFingerprint && !existing.retired) {
+    if (existing !== undefined && !existing.retired) {
       existing.lastUsedAt = Date.now();
       existing.activeOperations += 1;
       return existing;
     }
-    if (existing !== undefined) {
-      await retireSessionRecord(existing);
-    }
-
-    const creationKey = `${key}\u0000${configurationFingerprint}`;
+    const creationKey = key;
     const creation = sessionCreations.get(creationKey)
       ?? startPiSessionCreation(
         creationKey,
@@ -1429,7 +1555,7 @@ async function getOrCreatePiSession(options: PiCallOptions): Promise<PiSessionRe
 
   const record = await createPiSession(options, agentDir, configurationFingerprint);
   record.activeOperations += 1;
-  cacheSessionRecord(record, [record.session.sessionId]);
+  cacheSessionRecord(record, [record.current.session.sessionId]);
   return record;
 }
 
@@ -1472,7 +1598,9 @@ async function runWithPiSessionLock<T>(
     record.activeOperations -= 1;
     record.lastUsedAt = Date.now();
     if (record.retired && record.activeOperations === 0) {
-      await disposePiSessionRecord(record);
+      // The record owns cleanup even if shutdown handlers never settle; a
+      // retired record must not hold this call or an already queued call open.
+      void disposePiSessionRecord(record);
     } else if (record.activeOperations === 0) {
       enforcePiSessionCacheLimit();
     }
@@ -1604,19 +1732,21 @@ export async function callPi(
     }
     validatePiThinkingConfiguration(options.providerOptions?.thinkingLevel);
     const record = await getOrCreatePiSession(options);
-    const activeSessionId = record.session.sessionId;
+    const activeSessionId = record.current.session.sessionId;
     sessionId = activeSessionId;
     return await runWithPiSessionLock(record, options.abortSignal, async () => {
-      const session = record.session;
+      await updatePiSessionConfiguration(record, options);
+      const current = record.current;
+      const session = current.session;
       if (isAbortRequested(options.abortSignal)) {
         await retireSessionRecord(record);
         throw new Error('Pi session aborted');
       }
-      if (record.extensionErrors.length > 0) {
-        throw new Error(`Pi extension failed: ${record.extensionErrors.splice(0).join('; ')}`);
+      if (current.extensionErrors.length > 0) {
+        throw new Error(`Pi extension failed: ${current.extensionErrors.splice(0).join('; ')}`);
       }
-      await applyPiModel(record, options.model, options.providerOptions?.thinkingLevel);
-      record.setPiToolPolicyOptions(options);
+      await applyPiModel(current, options.model, options.providerOptions?.thinkingLevel);
+      current.setPiToolPolicyOptions(options);
       const state: PiTurnState = {
         responseText: '',
         assistantError: undefined,
@@ -1686,12 +1816,12 @@ export async function callPi(
       if (isAbortRequested(options.abortSignal) || state.assistantAborted) {
         throw new Error('Pi session aborted');
       }
-      record.assertPiToolPolicyHealthy();
+      current.assertPiToolPolicyHealthy();
       if (state.assistantError !== undefined) {
         throw new Error(state.assistantError);
       }
-      if (record.extensionErrors.length > 0) {
-        throw new Error(`Pi extension failed: ${record.extensionErrors.splice(0).join('; ')}`);
+      if (current.extensionErrors.length > 0) {
+        throw new Error(`Pi extension failed: ${current.extensionErrors.splice(0).join('; ')}`);
       }
 
       if (!state.responseText) {

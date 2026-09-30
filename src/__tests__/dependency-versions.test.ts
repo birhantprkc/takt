@@ -61,7 +61,7 @@ function parseVersionPart(part: string | undefined): number {
 }
 
 function compareNodeVersions(left: NodeVersion, right: NodeVersion): number {
-  for (let index = 0; index < left.length; index += 1) {
+  for (const index of [0, 1, 2] as const) {
     const difference = left[index] - right[index];
     if (difference !== 0) {
       return difference;
@@ -130,6 +130,19 @@ function getCaretUpperBound(version: NodeVersion): NodeVersion {
 }
 
 describe('dependency versions', () => {
+  it.each(['@earendil-works/pi-ai', '@earendil-works/pi-coding-agent'])(
+    'declares %s with a caret range and resolves every locked copy to 0.99.1',
+    (packageName) => {
+      const manifest = readPackageJson();
+      const copies = Object.entries(readPackageLock().packages ?? {})
+        .filter(([packagePath]) => packagePath.endsWith(`node_modules/${packageName}`));
+
+      expect(manifest.dependencies?.[packageName]).toBe('^0.99.1');
+      expect(copies.length).toBeGreaterThan(0);
+      for (const [, lockedPackage] of copies) expect(lockedPackage.version).toBe('0.99.1');
+    },
+  );
+
   it('records integrity for registry tarballs required by the Nix dependency fetcher', () => {
     const packages = Object.entries(readPackageLock().packages ?? {});
     const registryPackages = packages.filter(([, info]) => (

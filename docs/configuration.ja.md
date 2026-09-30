@@ -336,6 +336,12 @@ ignore_exceed: false          # takt run / takt watch で --ignore-exceed 相当
 
 TAKT の Pi provider は現在の TAKT process 内だけで使う embedded な in-memory Pi SDK session を使用します。Pi の session JSONL ファイルを書き込まず、Pi CLI のグローバル `settings.json` も読み書きしません。そのため、デフォルト model、thinking level、shell、retry option などの Pi グローバル設定は TAKT に自動継承されません。
 
+同じ process と作業ディレクトリ内でキャッシュ済み session を再利用する場合、明示拡張やリソース読み込み設定を変更しても論理 session ID と会話履歴を保持します。SessionManager を履歴の正本とし、先行 turn の終了と旧 runtime の shutdown を待ってから SDK runtime を交換します。model、thinking level、ツール許可は turn ごとに適用します。
+
+shutdown 成功後に交換先の初期化が失敗しても、会話履歴は後続の再構築に引き継ぎます。破棄済み runtime は再利用しません。shutdown 自体が失敗した場合は、交換と同じ論理 session での後続呼び出しを拒否します。
+
+Pi のツール許可は通常実行と入れ子実行の直前に検証します。空または空白だけの allowlist は全ツールを拒否します。登録元の検証失敗時はツールを無効化して実行を中断し、同じ論理 session の拡張構成を変更しても失敗状態を解除しません。標準の TAKT loader は SDK の組み込み MCP、codemode、tool search 拡張を自動で有効化しません。この検証は OS sandbox やツールごとの確認 prompt を提供するものではありません。
+
 Pi のデフォルトとして使う model は TAKT の設定で明示してください。model の選択と thinking level の選択は分けて設定します。legacy `config.yaml` モードでは、明示的な option を推奨します。
 
 ```yaml

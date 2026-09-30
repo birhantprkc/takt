@@ -334,6 +334,12 @@ ignore_exceed: false          # 对 takt run 和 takt watch 应用 --ignore-exce
 
 TAKT 的 Pi provider 在当前 TAKT 进程中使用嵌入式、内存中的 Pi SDK session。它不会写 Pi session JSONL，也不会读写 Pi CLI 全局 `settings.json`。因此 Pi 全局的默认 model、thinking level、shell 和 retry 选项不会自动继承到 TAKT。
 
+在同一进程和工作目录中复用已缓存的 session 时，改变显式 extension 或资源加载设置仍会保留逻辑 session ID 和对话历史。SessionManager 是历史的权威来源；TAKT 等待前一个 turn 结束和旧 runtime 的 shutdown 完成后，才替换 SDK runtime。每个 turn 都会应用 model、thinking level 和工具权限。
+
+如果 shutdown 成功后新 runtime 初始化失败，对话历史仍会保留，供后续重建使用；已释放的 runtime 不会被复用。如果 shutdown 本身失败，则阻止替换以及该逻辑 session 的后续调用。
+
+TAKT 在普通和嵌套工具执行之前检查 Pi 工具权限。空或仅含空白的 allowlist 拒绝所有工具。来源验证失败会禁用工具并中止执行；改变同一逻辑 session 的 extension 配置不能清除失败状态。标准 TAKT loader 不会自动启用 SDK 内置 MCP、codemode 或 tool search extension。这些检查不提供操作系统 sandbox 或逐工具确认提示。
+
 需要将 Pi 设为默认值时，请在 TAKT 配置中显式指定 model。model 选择和 thinking level 选择应分开配置。在旧版 `config.yaml` 模式下，推荐使用显式 option：
 
 ```yaml

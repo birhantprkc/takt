@@ -336,6 +336,12 @@ ignore_exceed: false          # Applies to takt run and takt watch like --ignore
 
 The TAKT Pi provider uses an embedded, in-memory Pi SDK session for the current TAKT process. It does not write Pi session JSONL files, and it does not read or write the Pi CLI global `settings.json`. Consequently, Pi global settings such as the default model, thinking level, shell, and retry options are not automatically inherited by TAKT.
 
+When reusing a cached session within that process and working directory, changing explicit extensions or resource-loading options preserves the logical session ID and conversation history. SessionManager remains the canonical history source while TAKT waits for the preceding turn and the old runtime's shutdown before replacing the SDK runtime. Model, thinking level, and tool permissions are applied for each turn.
+
+If replacement initialization fails after successful shutdown, the logical history remains available for a later reconstruction attempt; the disposed runtime is never reused. A shutdown failure blocks replacement and subsequent calls in that logical session.
+
+TAKT checks Pi tool permissions before both ordinary and nested tool execution. Empty or whitespace-only allowlists deny all tools; a provenance verification failure revokes tools, aborts execution, and cannot be cleared by changing extensions in the same logical session. The standard TAKT loader does not automatically enable the SDK's builtin MCP, codemode, or tool search extensions. These checks do not provide an OS sandbox or per-tool confirmation prompts.
+
 Set the model explicitly in TAKT configuration when it should be the default for Pi. Keep model selection and thinking-level selection separate. In legacy `config.yaml` mode, use the explicit option as the recommended form:
 
 ```yaml
