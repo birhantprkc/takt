@@ -59,7 +59,7 @@ const mocks = vi.hoisted(() => {
       }));
   }
 
-  const createAgentSession = vi.fn(async (options: {
+  const createAgentSession = vi.fn(/** Creates a fake SDK runtime with observable lease and shutdown gates. */ async (options: {
     sessionManager: { requestedId?: string };
   }) => {
     const requestedId = options.sessionManager.requestedId ?? `anonymous-${sequence + 1}`;
@@ -92,7 +92,7 @@ const mocks = vi.hoisted(() => {
         state.currentThinkingLevel = level;
         state.thinkingLevels.push(level);
       }),
-      getAllTools: vi.fn(() => [
+      getAllTools: vi.fn(/** Returns fresh original builtin provenance for each registry inspection. */ () => [
         { name: 'read', sourceInfo: { path: 'builtin:read', source: 'builtin' } },
         { name: 'grep', sourceInfo: { path: 'builtin:grep', source: 'builtin' } },
         { name: 'find', sourceInfo: { path: 'builtin:find', source: 'builtin' } },

@@ -81,8 +81,8 @@ describe('Pi live smoke file verification and cleanup', () => {
   it('cleans up before returning a modified-file error without throwing', async () => {
     const events: string[] = [];
     const io = {
-      readFile: vi.fn(async () => { events.push('check'); return Buffer.from('modified'); }),
-      rm: vi.fn(async () => { events.push('cleanup'); }),
+      readFile: vi.fn(/** Records verification before returning altered protected bytes. */ async () => { events.push('check'); return Buffer.from('modified'); }),
+      rm: vi.fn(/** Records cleanup to prove it follows file verification. */ async () => { events.push('cleanup'); }),
     };
     await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['auth.json must not be modified']);
     expect(events).toEqual(['check', 'cleanup']);
@@ -91,19 +91,22 @@ describe('Pi live smoke file verification and cleanup', () => {
 
   it('still cleans up when a protected file cannot be read', async () => {
     const io = {
-      readFile: vi.fn(async () => { throw Object.assign(new Error('unreadable'), { code: 'EACCES' }); }),
-      rm: vi.fn(async () => {}),
+      readFile: vi.fn(/** Simulates an access failure that must not skip cleanup. */ async () => { throw Object.assign(new Error('unreadable'), { code: 'EACCES' }); }),
+      rm: vi.fn(/** Observes cleanup after the simulated protected-file read failure. */ async () => {}),
     };
     await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['auth.json could not be verified']);
     expect(io.rm).toHaveBeenCalledOnce();
   });
 
   it('accepts unchanged files and files that remain absent', async () => {
-    const io = { readFile: vi.fn(async () => original), rm: vi.fn(async () => {}) };
+    const io = {
+      readFile: vi.fn(/** Returns unchanged protected bytes. */ async () => original),
+      rm: vi.fn(/** Observes successful cleanup without filesystem access. */ async () => {}),
+    };
     await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual([]);
     const absent = {
-      readFile: vi.fn(async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); }),
-      rm: vi.fn(async () => {}),
+      readFile: vi.fn(/** Simulates a file that was absent before and after the smoke. */ async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); }),
+      rm: vi.fn(/** Observes cleanup when protected files remain absent. */ async () => {}),
     };
     await expect(harness.verifySmokeFilesAndCleanup({ ...input, before: new Map([['auth.json', undefined]]) }, absent)).resolves.toEqual([]);
     expect(absent.rm).toHaveBeenCalledOnce();
@@ -111,8 +114,8 @@ describe('Pi live smoke file verification and cleanup', () => {
 
   it('reports cleanup failure without replacing a prior error with an exception', async () => {
     const io = {
-      readFile: vi.fn(async () => original),
-      rm: vi.fn(async () => { throw new Error('cleanup failed'); }),
+      readFile: vi.fn(/** Returns unchanged bytes so the cleanup failure is isolated. */ async () => original),
+      rm: vi.fn(/** Simulates removal failure for error aggregation, not exception replacement. */ async () => { throw new Error('cleanup failed'); }),
     };
     await expect(harness.verifySmokeFilesAndCleanup(input, io)).resolves.toEqual(['Smoke temporary directory cleanup failed']);
   });
