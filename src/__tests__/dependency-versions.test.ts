@@ -60,6 +60,7 @@ function parseVersionPart(part: string | undefined): number {
   return Number(part);
 }
 
+/** Compares parsed versions numerically, including multi-digit minor versions. */
 function compareNodeVersions(left: NodeVersion, right: NodeVersion): number {
   for (const index of [0, 1, 2] as const) {
     const difference = left[index] - right[index];

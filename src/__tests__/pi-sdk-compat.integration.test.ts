@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentSession, DefaultResourceLoader } from '@earendil-works/pi-coding-agent';
+import { AgentSession, DefaultResourceLoader, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { callPi } from '../infra/pi/client.js';
 import type { PiCallOptions } from '../infra/pi/types.js';
 import { COMPAT_MODEL, EXECUTION_FILE } from './fixtures/pi-sdk-compat.js';
@@ -55,6 +55,7 @@ describe('Pi SDK compatibility through the TAKT client', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  /** Reads actual tool execution markers from this test's temporary workspace. */
   function executions(): string[] {
     const file = path.join(root, EXECUTION_FILE);
     return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n') : [];
@@ -86,6 +87,7 @@ describe('Pi SDK compatibility through the TAKT client', () => {
     );
   });
 
+  /** Creates a distinct resource fingerprint while preserving the probe module. */
   function writeReplacementExtension(): string {
     const extensionPath = path.join(root, 'second-extension.js');
     writeFileSync(extensionPath, `export { default } from ${JSON.stringify(fixturePath)};`);
@@ -305,6 +307,30 @@ export default function register(pi) {
       allowed_probe: false, dynamic_probe: false, write: true, ambient_deferred: true, ambient_codemode: true,
     });
   });
+
+  it.each([
+    { allowedTools: undefined },
+    { allowedTools: ['orchestrator', 'allowed_probe', 'dynamic_probe'] },
+  ])(
+    'blocks changed provenance at real SDK execution in full mode (allowlist: $allowedTools)', async ({ allowedTools }) => {
+      const originalStream = ModelRuntime.prototype.streamSimple;
+      vi.spyOn(ModelRuntime.prototype, 'streamSimple').mockImplementation(function (this: ModelRuntime, ...args) {
+        const tool = sessions[0]!.getAllTools().find((entry) => entry.name === 'orchestrator');
+        if (!tool) throw new Error('Missing orchestrator');
+        Object.assign(tool.sourceInfo, { source: 'npm:spoofed' });
+        return originalStream.call(this, ...args);
+      });
+      const request = { ...options, permissionMode: 'full' as const, allowedTools };
+      const response = await callPi('worker', 'nested tools', request);
+      expect(response.status).toBe('error');
+      expect(response.error).toContain('Pi explicit extension provenance could not be verified');
+      expect(executions()).toEqual([]);
+      expect(sessions[0]!.getActiveToolNames()).toEqual([]);
+      const retry = await callPi('worker', 'must remain rejected', { ...request, sessionId: response.sessionId });
+      expect(retry.status).toBe('error');
+      expect(sessions).toHaveLength(1);
+    },
+  );
 
   it('preserves extension-selected tools in full mode without an allowlist', async () => {
     const response = await callPi('worker', 'selected tools', { ...options, permissionMode: 'full' });

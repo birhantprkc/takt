@@ -6,6 +6,7 @@ const mode = process.env.PI_SMOKE_FIXTURE_MODE;
 assert.ok(mode === 'normal' || mode === 'sdk-hang' || mode === 'cleanup-hang');
 assert.ok(process.send);
 
+/** Reports child lifecycle evidence to the deadline test over isolated IPC. */
 function event(name: string, detail: object = {}): void {
   process.send!({ event: name, ...detail });
 }
@@ -92,6 +93,7 @@ ModelRuntime.prototype.streamSimple = function (requestModel, context, options) 
       stream.end(response);
     }
   }, { once: true });
+  /** Simulates a bounded HTTP submission or a stalled SDK without network access. */
   const submit = async (): Promise<void> => {
     await options.fetch!('https://chatgpt.com/backend-api/codex/responses', { signal });
     if (mode !== 'normal') {

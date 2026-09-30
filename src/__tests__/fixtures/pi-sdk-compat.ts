@@ -6,20 +6,24 @@ import { createReadToolDefinition, type ExtensionAPI } from '@earendil-works/pi-
 export const COMPAT_MODEL = 'takt-compat-test/offline';
 export const EXECUTION_FILE = 'tool-executions.txt';
 
+/** Extracts text consistently from user, assistant, and tool-result messages. */
 function messageText(message: Message): string {
   return typeof message.content === 'string'
     ? message.content
     : message.content.map((block) => block.type === 'text' ? block.text : '').join('');
 }
 
+/** Registers offline history and nested-tool probes through the real SDK API. */
 export default function registerCompatibilityProbe(pi: ExtensionAPI): void {
   const parameters = createReadToolDefinition('.').parameters;
+  /** Adds a deferred tool whose file marker proves execution, not just selection. */
   const registerProbe = (name: string) => pi.registerTool({
     name,
     label: name,
     description: 'Offline tool execution probe',
     parameters,
     exposure: 'deferred',
+    /** Records an actual deferred tool execution in the fixture's isolated cwd. */
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       appendFileSync(join(ctx.cwd, EXECUTION_FILE), `${name}\n`);
       return { content: [{ type: 'text', text: name }], details: {} };
@@ -32,6 +36,7 @@ export default function registerCompatibilityProbe(pi: ExtensionAPI): void {
     label: 'orchestrator',
     description: 'Calls tools through the real SDK nested execution pipeline',
     parameters,
+    /** Exercises the SDK's nested pipeline and returns per-tool denials. */
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const outcomes: Record<string, boolean> = {};
       for (const name of ['allowed_probe', 'dynamic_probe', 'write', 'ambient_deferred', 'ambient_codemode']) {

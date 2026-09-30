@@ -265,6 +265,7 @@ import { callPi } from '../infra/pi/client.js';
 import type { PiCallOptions } from '../infra/pi/types.js';
 import { createWorkflowStepDeadline } from '../core/workflow/engine/step-deadline.js';
 
+/** Builds deterministic cache options without external model or file discovery. */
 function options(sessionId: string) {
   return {
     cwd: path.join(tmpdir(), 'takt-pi-cache-project'),

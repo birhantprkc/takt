@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     scope: 'temporary' as const,
     origin: 'top-level' as const,
   });
+  /** Creates fresh builtin, SDK, trusted, and ambient provenance objects per test. */
   const createDefaultTools = () => [
     { name: 'read', sourceInfo: createSourceInfo('builtin:read', 'builtin') },
     { name: 'grep', sourceInfo: createSourceInfo('builtin:grep', 'builtin') },
@@ -341,6 +342,21 @@ function configureExplicitExtensions(
   )));
 }
 
+/** Calls the loader's real execution hook without starting a model request. */
+function invokeToolGuard(toolName: string): unknown {
+  const options = mocks.getLoaderOptions();
+  if (!options || typeof options !== 'object' || !('extensionFactories' in options)
+    || !Array.isArray(options.extensionFactories) || typeof options.extensionFactories[0] !== 'function') {
+    throw new Error('Missing loader execution guard factory');
+  }
+  const handlers = new Map<string, unknown>();
+  options.extensionFactories[0]({ on: (name: string, handler: unknown) => handlers.set(name, handler) });
+  const guard = handlers.get('tool_call');
+  if (typeof guard !== 'function') throw new Error('Missing execution hook');
+  return guard({ toolName });
+}
+
+/** Supplies stable logical-session options for isolated client policy tests. */
 function sessionOptions(id: string) {
   return {
     cwd: path.join(tmpdir(), 'takt-pi-project'),
@@ -1904,6 +1920,45 @@ export default function registerLifecycleTool(pi) {
     expect(mocks.session.setActiveToolsByName).toHaveBeenLastCalledWith([]);
     expect(mocks.session.abort).toHaveBeenCalled();
     expect(mocks.session.prompt).toHaveBeenCalledOnce();
+  });
+
+  it.each(['cached', 'refresh', 'selection', 'execution'] as const)(
+    'latches changed full-mode provenance through the %s path', async (route) => {
+      mocks.resetTransient();
+      configureExplicitExtensions([{ source: './trusted-extension.ts', path: TRUSTED_EXTENSION_PATH }]);
+      const options = {
+        ...sessionOptions(`full-provenance-${route}`), permissionMode: 'full' as const,
+        providerOptions: { extensions: ['./trusted-extension.ts'] },
+      };
+      expect((await callPi('worker', 'before mutation', options)).status).toBe('done');
+      const tool = mocks.session.getAllTools().find((entry) => entry.name === 'trusted_extension_tool');
+      if (!tool) throw new Error('Missing trusted tool');
+      tool.sourceInfo.source = 'npm:spoofed';
+      if (route === 'cached') {
+        expect((await callPi('worker', 'after mutation', options)).status).toBe('error');
+      } else {
+        const act = route === 'refresh'
+          ? () => mocks.triggerRuntimeRefreshTools()
+          : route === 'selection'
+            ? () => mocks.triggerRuntimeSetActiveTools(['trusted_extension_tool'])
+            : () => invokeToolGuard('trusted_extension_tool');
+        expect(act).toThrow('Pi explicit extension provenance could not be verified');
+      }
+      expect(mocks.session.setActiveToolsByName).toHaveBeenLastCalledWith([]);
+      expect(mocks.session.abort).toHaveBeenCalled();
+      tool.sourceInfo.source = './trusted-extension.ts';
+      const retry = await callPi('worker', 'after restoring source', options);
+      expect(retry.status).toBe('error');
+      expect(mocks.session.prompt).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps a valid full-mode execution guard from expanding extension-selected tools', async () => {
+    mocks.resetTransient();
+    await callPi('worker', 'select tools', { ...sessionOptions('full-guard-selection'), permissionMode: 'full' });
+    mocks.triggerRuntimeSetActiveTools(['trusted_extension_tool']);
+    expect(invokeToolGuard('trusted_extension_tool')).toBeUndefined();
+    expect(mocks.session.setActiveToolsByName).toHaveBeenLastCalledWith(['trusted_extension_tool']);
   });
 
   it('reapplies the restrictive policy after SDK refresh registers an ambient tool', async () => {

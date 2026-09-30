@@ -1141,7 +1141,9 @@ provider_options:
 
 未指定 permission mode 时，显式 `allowedTools` 列表也会经过 tool 来源验证。自动发现的 extension tool 即使列在 `allowedTools` 中也会被排除；要启用 extension tool，必须在 `extensions` 中明确配置其来源，并在 `allowedTools` 中列出 tool 名称。配置 extension 不会添加列表以外的 tool。仅包含 skills、prompts 或 themes 的 package 仍可正常加载，且不会因此授权 extension tool。
 
-当显式配置的 extension 在 factory 初始化时注册与 builtin 同名的 tool，extension 版本会像普通 Pi 一样替换 builtin。在 `readonly` 和 `edit` 中，该名称必须符合 mode 的 builtin 权限；如果指定了 `allowedTools`，还必须包含在列表中。未指定 permission mode 且显式指定 `allowedTools`，或 `full` 且列表仅包含 readonly tool 时，该名称也必须在列表中。例如，`readonly` + `['grep']` 不会启用 extension 的 `read`，`edit` + `['read']` 不会启用其 `bash`。被排除的名称不会回退到原来的 builtin。这些分支仍然排除 ambient 覆盖。在 `full` 以外的模式中，无法验证 provenance 时会停止 Pi call，包括在 `session_start` 中才更改 builtin 注册来源的情况。
+当显式配置的 extension 在 factory 初始化时注册与 builtin 同名的 tool，extension 版本会像普通 Pi 一样替换 builtin。在 `readonly` 和 `edit` 中，该名称必须符合 mode 的 builtin 权限；如果指定了 `allowedTools`，还必须包含在列表中。未指定 permission mode 且显式指定 `allowedTools`，或 `full` 且列表仅包含 readonly tool 时，该名称也必须在列表中。例如，`readonly` + `['grep']` 不会启用 extension 的 `read`，`edit` + `['read']` 不会启用其 `bash`。被排除的名称不会回退到原来的 builtin。这些分支仍然排除 ambient 覆盖。在包括 `full` 的所有模式中，无法验证 provenance 时会停止 Pi call，包括在 `session_start` 中才更改 builtin 注册来源的情况。
+
+注册来源的完整性检查与权限授予分开处理。`full` 未指定 `allowedTools` 时仍允许所有已注册 tool，并保留 SDK 的有效 active-tool 选择。cached call、registry refresh、直接选择 tool，以及普通或 nested tool 执行前都会验证 provenance。合法动态注册仍受支持；来源被篡改时会禁用全部 tool、终止执行，并在同一 logical session 中保持失败状态。
 
 <a id="workflow-categories"></a>
 

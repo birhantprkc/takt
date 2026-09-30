@@ -11,6 +11,7 @@ const preload = fileURLToPath(new URL('./fixtures/pi-live-smoke-deadline.ts', im
 
 interface FixtureEvent { event: string; sessionId?: string }
 
+/** Runs the smoke entrypoint with offline SDK/HTTP fixtures and fast deadlines. */
 async function runSmoke(mode: 'normal' | 'sdk-hang' | 'cleanup-hang') {
   const root = mkdtempSync(join(tmpdir(), 'takt-pi-deadline-test-'));
   const child = spawn(process.execPath, ['--import', 'tsx', '--import', preload, script], {

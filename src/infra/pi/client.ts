@@ -279,6 +279,7 @@ function assertSafeExtensionSources(sources: readonly string[]): void {
   }
 }
 
+/** Normalizes SDK ownership metadata into a comparable source/path identity. */
 function getPiToolProvenance(
   cwd: string,
   sourceInfo: { source: string; path: string },
@@ -298,33 +299,47 @@ function hasMatchingPiToolProvenance(
   return left.source === right.source && left.sourcePath === right.sourcePath;
 }
 
-/** Validates registered tool provenance before selecting the session's active tools. */
+type PiResolvedTool = PiToolProvenance & { readonly name: string };
+
+/** Copies the live registry's mutable source metadata for integrity validation. */
+function readPiTools(session: AgentSession, options: PiCallOptions): PiResolvedTool[] {
+  return session.getAllTools().map((tool) => ({
+    name: tool.name,
+    ...getPiToolProvenance(options.cwd, tool.sourceInfo),
+  }));
+}
+
+/** Checks registry identity in every mode without changing grants or active selection. */
+function validatePiToolProvenance(
+  allTools: readonly PiResolvedTool[],
+  explicitExtensionPaths: readonly string[],
+  registeredProvenance: ReadonlyMap<string, PiToolProvenance>,
+): void {
+  for (const tool of allTools) {
+    const original = registeredProvenance.get(tool.name);
+    if (original !== undefined
+      ? !hasMatchingPiToolProvenance(original, tool)
+      : tool.source === 'builtin' || explicitExtensionPaths.includes(tool.sourcePath)) {
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
+    }
+  }
+  for (const [name, original] of registeredProvenance) {
+    if (explicitExtensionPaths.includes(original.sourcePath)
+      && allTools.filter((tool) => tool.name === name).length !== 1) {
+      throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
+    }
+  }
+}
+
+/** Validates registry identity before selecting tools allowed by the current call. */
 function applyPiTools(
   session: AgentSession,
   options: PiCallOptions,
   explicitExtensionPaths: readonly string[],
   registeredProvenance: ReadonlyMap<string, PiToolProvenance>,
 ): void {
-  const allTools = session.getAllTools().map((tool) => ({
-    name: tool.name,
-    ...getPiToolProvenance(options.cwd, tool.sourceInfo),
-  }));
-  if (options.permissionMode !== 'full') {
-    for (const tool of allTools) {
-      const original = registeredProvenance.get(tool.name);
-      if (original !== undefined
-        ? !hasMatchingPiToolProvenance(original, tool)
-        : tool.source === 'builtin' || explicitExtensionPaths.includes(tool.sourcePath)) {
-        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
-      }
-    }
-    for (const [name, original] of registeredProvenance) {
-      if (explicitExtensionPaths.includes(original.sourcePath)
-        && allTools.filter((tool) => tool.name === name).length !== 1) {
-        throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
-      }
-    }
-  }
+  const allTools = readPiTools(session, options);
+  validatePiToolProvenance(allTools, explicitExtensionPaths, registeredProvenance);
   session.setActiveToolsByName(resolvePiActiveTools(
     options.permissionMode,
     options.allowedTools,
@@ -359,28 +374,31 @@ function installPiToolRefreshPolicy(
   }]));
   const refreshTools = extensionRuntime.refreshTools;
   const setActiveTools = extensionRuntime.setActiveTools;
-  const enforce = (update?: () => void) => {
+  /** Latches integrity failures and optionally preserves the SDK's active selection. */
+  const enforce = (update?: () => void, preserveSelection = false) => {
     try {
       if (policyState.failure) throw policyState.failure;
-      if (currentOptions.permissionMode !== 'full') {
-        for (const owner of owners) {
-          for (const [name, tool] of owner.tools) {
-            const toolProvenance = getPiToolProvenance(initialOptions.cwd, tool.sourceInfo);
-            if (!hasMatchingPiToolProvenance(toolProvenance, owner)) {
-              throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
-            }
-            const original = registeredProvenance.get(name);
-            if (original && !hasMatchingPiToolProvenance(original, owner)) {
-              throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
-            }
-            if (!original) {
-              registeredProvenance.set(name, { source: owner.source, sourcePath: owner.sourcePath });
-            }
+      for (const owner of owners) {
+        for (const [name, tool] of owner.tools) {
+          const toolProvenance = getPiToolProvenance(initialOptions.cwd, tool.sourceInfo);
+          if (!hasMatchingPiToolProvenance(toolProvenance, owner)) {
+            throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
+          }
+          const original = registeredProvenance.get(name);
+          if (original && !hasMatchingPiToolProvenance(original, owner)) {
+            throw new PiToolPolicyError('Pi explicit extension provenance could not be verified');
+          }
+          if (!original) {
+            registeredProvenance.set(name, { source: owner.source, sourcePath: owner.sourcePath });
           }
         }
       }
       update?.();
-      applyPiTools(session, currentOptions, explicitExtensionPaths, registeredProvenance);
+      if (preserveSelection) {
+        validatePiToolProvenance(readPiTools(session, currentOptions), explicitExtensionPaths, registeredProvenance);
+      } else {
+        applyPiTools(session, currentOptions, explicitExtensionPaths, registeredProvenance);
+      }
     } catch (error) {
       policyState.failure = error;
       // SDK hook dispatch may swallow exceptions. Revoke tools synchronously,
@@ -399,13 +417,13 @@ function installPiToolRefreshPolicy(
       || currentOptions.allowedTools !== undefined) {
       enforce();
     } else {
-      if (policyState.failure) throw policyState.failure;
+      enforce(undefined, true);
       setActiveTools(toolNames);
     }
   };
   executionGuard.check = (toolName) => {
     if (currentOptions.permissionMode === 'full' && currentOptions.allowedTools === undefined) {
-      if (policyState.failure) throw policyState.failure;
+      enforce(undefined, true);
       return true;
     }
     enforce();
@@ -613,6 +631,7 @@ function createExtensionSourceSearch(source: string): ExtensionSourceSearch {
   };
 }
 
+/** Builds the isolated SDK loader and installs the per-tool execution guard. */
 function createPiResourceLoader(
   cwd: string,
   agentDir: string,
@@ -1127,6 +1146,7 @@ function registerPendingExtensionProviders(
   }
 }
 
+/** Applies a model override and resets a removed thinking-level override. */
 async function applyPiModel(
   record: PiSessionRuntime,
   modelReference: string | undefined,
@@ -1150,6 +1170,7 @@ async function applyPiModel(
   }
 }
 
+/** Runs extension shutdown and always disposes, including handler failures. */
 async function shutdownPiSession(session: AgentSession, extensionErrors: readonly string[] = []): Promise<void> {
   try {
     if (session.hasExtensionHandlers('session_shutdown')) {
@@ -1165,12 +1186,14 @@ async function shutdownPiSession(session: AgentSession, extensionErrors: readonl
   }
 }
 
+/** Shares the original shutdown promise so reconstruction sees cleanup failures. */
 function getPiRuntimeShutdown(runtime: PiSessionRuntime): Promise<void> {
   runtime.shutdownPromise ??= Promise.resolve()
     .then(() => shutdownPiSession(runtime.session, runtime.extensionErrors));
   return runtime.shutdownPromise;
 }
 
+/** Retires a cached record with idempotent, best-effort runtime disposal. */
 function disposePiSessionRecord(record: PiSessionRecord): Promise<void> {
   if (record.disposed) {
     return record.disposalPromise ?? Promise.resolve();
@@ -1356,6 +1379,7 @@ async function createPiSessionRuntime(
   }
 }
 
+/** Creates a logical session with an in-memory history and shared policy latch. */
 async function createPiSession(
   options: PiCallOptions,
   agentDir: string,
@@ -1494,6 +1518,7 @@ async function waitForPiSessionCreation(
   }
 }
 
+/** Starts shared construction and retains a lease until waiting callers take over. */
 function startPiSessionCreation(
   key: string,
   requestedSessionId: string,
@@ -1539,6 +1564,7 @@ function startPiSessionCreation(
   return creation;
 }
 
+/** Acquires a cached session lease or shares construction for a requested ID. */
 async function getOrCreatePiSession(options: PiCallOptions): Promise<PiSessionRecord> {
   const agentDir = getAgentDir();
   const configurationFingerprint = buildSessionConfigurationFingerprint(options, agentDir);
@@ -1569,6 +1595,7 @@ async function getOrCreatePiSession(options: PiCallOptions): Promise<PiSessionRe
   return record;
 }
 
+/** Serializes logical-session operations and releases their leases on every exit. */
 async function runWithPiSessionLock<T>(
   record: PiSessionRecord,
   abortSignal: AbortSignal | undefined,

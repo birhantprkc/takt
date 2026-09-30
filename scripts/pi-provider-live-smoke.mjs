@@ -19,12 +19,14 @@ export function createSmokeBudget() {
   let turnRequests = 0;
   let turnSubmissions = 0;
   return {
+    /** Starts one authorized turn and resets only its per-turn counters. */
     beginTurn() {
       assert.ok(turn < 2, 'Smoke is limited to two turns');
       turn += 1;
       turnRequests = 0;
       turnSubmissions = 0;
     },
+    /** Rejects extra inference or deviations from the authorized model/options. */
     request(model, options) {
       assert.ok(turn > 0 && turn <= 2);
       assert.equal(`${model.provider}/${model.id}`, MODEL);
@@ -39,6 +41,7 @@ export function createSmokeBudget() {
       turnRequests += 1;
       requests += 1;
     },
+    /** Allows one Codex HTTP submission per already-counted SDK request. */
     submit(url) {
       assert.equal(new URL(url).href, 'https://chatgpt.com/backend-api/codex/responses');
       assert.equal(turnRequests, 1);
@@ -46,6 +49,7 @@ export function createSmokeBudget() {
       turnSubmissions += 1;
       submissions += 1;
     },
+    /** Reports consumed counters without changing the request budget. */
     counts() { return { requests, submissions }; },
   };
 }
