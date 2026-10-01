@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.67.1] - 2026-10-01
+
+### Changed
+
+- The Pi provider SDK (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`) is updated from 0.85.1 to 0.99.1 (#1640). Configuration is unchanged; session reuse, tool allowlists, `readonly` / `edit` restrictions, and explicit extension checks keep working as before.
+
+### Fixed
+
+- Kiro provider: the first reply in interactive mode no longer fails with `unexpected argument '--mcp-config'` (#1644). `kiro-cli` has no such flag, so Kiro is now treated as a provider without runtime MCP support: interactive mode reports that task-state lookup is unavailable and continues the conversation, and a workflow that assigns `mcp_servers` to Kiro fails before the step runs.
+- TAKT no longer exits with `ETIMEDOUT` while reading or locking tasks under heavy load; the helper process used for task storage now has a 30-second limit instead of 5 seconds (#1647).
+- OpenCode v2: session-state records (`idle`, agent/model/location switches) are no longer treated as user messages (#1648). Because `idle` follows every reply, the rate-limit check after a silence timeout could not find the latest assistant message on v2.
+
+### Internal
+
+- The Nix package rebuilds production dependencies from the lockfile instead of pruning them, and the npm dependency hash is updated.
+- OpenCode E2E uses `kimi-code-plan-global/k3` as the default model; the list-tool shim integration test runs only against an OpenCode v1 binary, and the conversation E2E reads v2 session permissions.
+
 ## [0.67.0] - 2026-09-30
 
 ### Added

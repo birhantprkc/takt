@@ -6,6 +6,23 @@
 
 フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に基づいています。
 
+## [0.67.1] - 2026-10-01
+
+### Changed
+
+- Pi provider の SDK（`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`）を 0.85.1 から 0.99.1 に更新しました (#1640)。設定の書き方は変わらず、セッションの再利用、ツールの allowlist、`readonly` / `edit` の制限、明示した extension の検査は従来どおり動きます。
+
+### Fixed
+
+- Kiro provider で、対話モードの最初の応答が `unexpected argument '--mcp-config'` で失敗しなくなりました (#1644)。`kiro-cli` にはこのフラグがないため、Kiro を runtime MCP 非対応の provider として扱います。対話モードではタスク状態の参照が使えないことを通知して会話を続け、workflow で Kiro に `mcp_servers` を割り当てた場合はステップの実行前に失敗します。
+- 高負荷時に、タスクの読み込みやロック中に TAKT が `ETIMEDOUT` で終了しなくなりました。タスクの保存に使う helper プロセスの制限時間を 5 秒から 30 秒に延ばしました (#1647)。
+- OpenCode v2 で、セッション状態の記録（`idle`、agent・model・location の切り替え）を user メッセージとして扱わないようにしました (#1648)。`idle` は毎回の応答の後に付くため、v2 では無音タイムアウト後のレート制限の判定が最新の assistant メッセージを見つけられませんでした。
+
+### Internal
+
+- Nix パッケージで、本番依存を prune せずに lockfile から再構築するようにし、npm 依存の hash を更新しました。
+- OpenCode E2E の既定モデルを `kimi-code-plan-global/k3` に変更しました。list ツールのシムの統合テストは OpenCode v1 のバイナリでだけ実行し、会話の E2E は v2 のセッション権限も読むようにしました。
+
 ## [0.67.0] - 2026-09-30
 
 ### Added
