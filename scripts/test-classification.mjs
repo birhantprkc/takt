@@ -363,6 +363,7 @@ export const lightNamedIntegrationTestFiles = Object.freeze([
   'src/__tests__/kiro-provider-integration.test.ts',
   'src/__tests__/mcp-entrypoint.integration.test.ts',
   'src/__tests__/pi-builtin-override.integration.test.ts',
+  'src/__tests__/pi-sdk-compat.integration.test.ts',
   'src/__tests__/repertoire/add-integration.test.ts',
   'src/__tests__/repertoire/remove-integration.test.ts',
   'src/__tests__/runtime-provider-aux-entry.integration.test.ts',

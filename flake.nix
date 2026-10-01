@@ -30,11 +30,22 @@
             version = packageJson.version;
             src = ./.;
 
-            npmDepsHash = "sha256-hh3LHzlPvHYtHTLNlG8wYvuZi8HKIcaVLFB0YtfO3+c=";
+            npmDepsHash = "sha256-uUapC5e7lh8mao14NA4SKVOdScZofMmQzBvPZPAyUOw=";
             npmDepsFetcherVersion = 2;
             nodejs = nodejs;
             ONNXRUNTIME_NODE_INSTALL = "skip";
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+
+            # npm prune fails in its reify rollback for this dependency tree.
+            # Recreate the production-only tree from the same lockfile/cache,
+            # retaining dependency install scripts without changing CI checks.
+            preInstall = ''
+              npm ci --omit=dev --ignore-scripts
+              patchShebangs node_modules
+              npm rebuild --omit=dev
+              patchShebangs node_modules
+            '';
+            dontNpmPrune = true;
 
             meta = {
               description = packageJson.description;
